@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -29,9 +30,13 @@ type inMemoryInventoryService struct {
 }
 
 func NewInventoryService() InventoryService {
-	return &inMemoryInventoryService{
+	s := &inMemoryInventoryService{
 		items: make(map[string]model.InventoryItem),
 	}
+	for _, item := range seedItems() {
+		s.Create(item)
+	}
+	return s
 }
 
 func (s *inMemoryInventoryService) List() ([]model.InventoryItem, error) {
@@ -42,6 +47,12 @@ func (s *inMemoryInventoryService) List() ([]model.InventoryItem, error) {
 	for _, item := range s.items {
 		items = append(items, item)
 	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
+		}
+		return items[i].ID < items[j].ID
+	})
 	return items, nil
 }
 
