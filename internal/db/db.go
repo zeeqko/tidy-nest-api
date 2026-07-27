@@ -7,7 +7,7 @@ import (
 	"io/fs"
 	"sort"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed migrations/*.sql
@@ -16,10 +16,10 @@ var migrationFiles embed.FS
 //go:embed seeders/*.sql
 var seederFiles embed.FS
 
-// Open opens (or creates) the SQLite database with foreign keys enforced.
-func Open(path string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", path)
-	database, err := sql.Open("sqlite", dsn)
+// Open opens the PostgreSQL database and verifies the connection.
+// dsn example: postgres://postgres:postgres@localhost:5432/organizing_app?sslmode=disable
+func Open(dsn string) (*sql.DB, error) {
+	database, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -44,7 +44,7 @@ func Seed(database *sql.DB) error {
 // records it in trackingTable so reruns are no-ops.
 func apply(database *sql.DB, files embed.FS, dir, trackingTable string) error {
 	createTracking := fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s (name TEXT PRIMARY KEY, appliedAt TEXT NOT NULL DEFAULT (datetime('now')))`,
+		`CREATE TABLE IF NOT EXISTS %s (name TEXT PRIMARY KEY, appliedAt TIMESTAMPTZ NOT NULL DEFAULT now())`,
 		trackingTable,
 	)
 	if _, err := database.Exec(createTracking); err != nil {
@@ -61,7 +61,7 @@ func apply(database *sql.DB, files embed.FS, dir, trackingTable string) error {
 		name := entry.Name()
 
 		var applied int
-		row := database.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE name = ?`, trackingTable), name)
+		row := database.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE name = $1`, trackingTable), name)
 		if err := row.Scan(&applied); err != nil {
 			return err
 		}
@@ -82,7 +82,7 @@ func apply(database *sql.DB, files embed.FS, dir, trackingTable string) error {
 			tx.Rollback()
 			return fmt.Errorf("%s/%s: %w", dir, name, err)
 		}
-		if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO %s (name) VALUES (?)`, trackingTable), name); err != nil {
+		if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO %s (name) VALUES ($1)`, trackingTable), name); err != nil {
 			tx.Rollback()
 			return err
 		}

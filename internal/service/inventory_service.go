@@ -1,10 +1,11 @@
 package service
 
 import (
+	"database/sql"
 	"errors"
-	"sort"
+	"fmt"
 	"strconv"
-	"sync"
+	"strings"
 	"time"
 
 	"organizing-app-backend/internal/model"
@@ -13,100 +14,399 @@ import (
 var ErrItemNotFound = errors.New("inventory item not found")
 
 // InventoryService defines the business operations available on inventory items.
+// Every operation is scoped to the authenticated user's id.
 type InventoryService interface {
-	List() ([]model.InventoryItem, error)
-	Get(id string) (model.InventoryItem, error)
-	Create(item model.InventoryItem) (model.InventoryItem, error)
-	Update(id string, item model.InventoryItem) (model.InventoryItem, error)
-	Delete(id string) error
+	List(userID int64) ([]model.InventoryItem, error)
+	Get(userID int64, id string) (model.InventoryItem, error)
+	Create(userID int64, item model.InventoryItem) (model.InventoryItem, error)
+	Update(userID int64, id string, item model.InventoryItem) (model.InventoryItem, error)
+	Delete(userID int64, id string) error
 }
 
-// inMemoryInventoryService is a stub implementation to be swapped for a
-// database-backed implementation later.
-type inMemoryInventoryService struct {
-	mu    sync.RWMutex
-	items map[string]model.InventoryItem
-	seq   int
+// postgresInventoryService serves the flat API item shape from the relational
+// schema (Inventories → SubCategories → Categories, ItemTags). Subtitle and
+// status are derived, not stored, so they are ignored on Create/Update.
+type postgresInventoryService struct {
+	db *sql.DB
 }
 
-func NewInventoryService() InventoryService {
-	s := &inMemoryInventoryService{
-		items: make(map[string]model.InventoryItem),
+func NewInventoryService(db *sql.DB) InventoryService {
+	return &postgresInventoryService{db: db}
+}
+
+const selectItem = `
+SELECT i.id, i.name, i.quantity,
+       COALESCE(i.storageLocation, ''), COALESCE(i.notes, ''), COALESCE(i.imageURL, ''),
+       COALESCE(sc.name, ''), COALESCE(c.name, ''),
+       i.expiryDate, i.opensOn, i.createdAt, i.updatedAt
+FROM Inventories i
+LEFT JOIN SubCategories sc ON sc.id = i.subCategoryId
+LEFT JOIN Categories c ON c.id = sc.categoryId
+WHERE i.userId = $1`
+
+func (s *postgresInventoryService) List(userID int64) ([]model.InventoryItem, error) {
+	rows, err := s.db.Query(selectItem+` ORDER BY i.createdAt, i.id`, userID)
+	if err != nil {
+		return nil, err
 	}
-	for _, item := range seedItems() {
-		s.Create(item)
-	}
-	return s
-}
+	defer rows.Close()
 
-func (s *inMemoryInventoryService) List() ([]model.InventoryItem, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	items := make([]model.InventoryItem, 0, len(s.items))
-	for _, item := range s.items {
+	items := make([]model.InventoryItem, 0)
+	for rows.Next() {
+		item, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, item)
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
-			return items[i].CreatedAt.Before(items[j].CreatedAt)
-		}
-		return items[i].ID < items[j].ID
-	})
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.fillTags(items); err != nil {
+		return nil, err
+	}
 	return items, nil
 }
 
-func (s *inMemoryInventoryService) Get(id string) (model.InventoryItem, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	item, ok := s.items[id]
-	if !ok {
-		return model.InventoryItem{}, ErrItemNotFound
-	}
-	return item, nil
-}
-
-func (s *inMemoryInventoryService) Create(item model.InventoryItem) (model.InventoryItem, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.seq++
-	now := time.Now()
-	item.ID = generateID(s.seq)
-	item.CreatedAt = now
-	item.UpdatedAt = now
-	s.items[item.ID] = item
-	return item, nil
-}
-
-func (s *inMemoryInventoryService) Update(id string, item model.InventoryItem) (model.InventoryItem, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	existing, ok := s.items[id]
-	if !ok {
+func (s *postgresInventoryService) Get(userID int64, id string) (model.InventoryItem, error) {
+	numericID, err := parseID(id)
+	if err != nil {
 		return model.InventoryItem{}, ErrItemNotFound
 	}
 
-	item.ID = existing.ID
-	item.CreatedAt = existing.CreatedAt
-	item.UpdatedAt = time.Now()
-	s.items[id] = item
-	return item, nil
+	row := s.db.QueryRow(selectItem+` AND i.id = $2`, userID, numericID)
+	item, err := scanItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.InventoryItem{}, ErrItemNotFound
+	}
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	items := []model.InventoryItem{item}
+	if err := s.fillTags(items); err != nil {
+		return model.InventoryItem{}, err
+	}
+	return items[0], nil
 }
 
-func (s *inMemoryInventoryService) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// fillTags populates Tags on each item from the InventoryTags junction table.
+func (s *postgresInventoryService) fillTags(items []model.InventoryItem) error {
+	byID := make(map[string]*model.InventoryItem, len(items))
+	ids := make([]int64, 0, len(items))
+	for i := range items {
+		items[i].Tags = []model.TagRef{}
+		byID[items[i].ID] = &items[i]
+		numericID, err := parseID(items[i].ID)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, numericID)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
 
-	if _, ok := s.items[id]; !ok {
+	rows, err := s.db.Query(
+		`SELECT it.inventoryId, t.name, COALESCE(t.colour, '')
+		 FROM InventoryTags it
+		 JOIN ItemTags t ON t.id = it.tagId
+		 WHERE it.inventoryId = ANY($1)
+		 ORDER BY t.name`,
+		pgIntArray(ids),
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			inventoryID int64
+			tag         model.TagRef
+		)
+		if err := rows.Scan(&inventoryID, &tag.Name, &tag.Colour); err != nil {
+			return err
+		}
+		if item := byID[strconv.FormatInt(inventoryID, 10)]; item != nil {
+			item.Tags = append(item.Tags, tag)
+		}
+	}
+	return rows.Err()
+}
+
+// pgIntArray renders ids as a Postgres bigint array literal for ANY($1).
+func pgIntArray(ids []int64) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = strconv.FormatInt(id, 10)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
+}
+
+func (s *postgresInventoryService) Create(userID int64, item model.InventoryItem) (model.InventoryItem, error) {
+	if item.Quantity <= 0 {
+		item.Quantity = 1
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+	defer tx.Rollback()
+
+	subCategoryID, categoryID, err := ensureSubCategory(tx, item.Category, item.Subcategory)
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	var id int64
+	err = tx.QueryRow(
+		`INSERT INTO Inventories (userId, name, subCategoryId, quantity, storageLocation, notes, imageURL, expiryDate, opensOn, createdAt, updatedAt)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, '')::date, NULLIF($9, '')::date, now(), now())
+		 RETURNING id`,
+		userID, item.Name, subCategoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn,
+	).Scan(&id)
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+	if err := replaceItemTags(tx, id, item.Tags, categoryID); err != nil {
+		return model.InventoryItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	return s.Get(userID, strconv.FormatInt(id, 10))
+}
+
+func (s *postgresInventoryService) Update(userID int64, id string, item model.InventoryItem) (model.InventoryItem, error) {
+	numericID, err := parseID(id)
+	if err != nil {
+		return model.InventoryItem{}, ErrItemNotFound
+	}
+	if item.Quantity <= 0 {
+		item.Quantity = 1
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+	defer tx.Rollback()
+
+	subCategoryID, categoryID, err := ensureSubCategory(tx, item.Category, item.Subcategory)
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	result, err := tx.Exec(
+		`UPDATE Inventories
+		 SET name = $1, subCategoryId = $2, quantity = $3, storageLocation = $4, notes = $5, imageURL = NULLIF($6, ''),
+		     expiryDate = NULLIF($7, '')::date, opensOn = NULLIF($8, '')::date, updatedAt = now()
+		 WHERE id = $9 AND userId = $10`,
+		item.Name, subCategoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn, numericID, userID,
+	)
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+	if affected == 0 {
+		return model.InventoryItem{}, ErrItemNotFound
+	}
+	if err := replaceItemTags(tx, numericID, item.Tags, categoryID); err != nil {
+		return model.InventoryItem{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	return s.Get(userID, id)
+}
+
+func (s *postgresInventoryService) Delete(userID int64, id string) error {
+	numericID, err := parseID(id)
+	if err != nil {
 		return ErrItemNotFound
 	}
-	delete(s.items, id)
+
+	result, err := s.db.Exec(`DELETE FROM Inventories WHERE id = $1 AND userId = $2`, numericID, userID)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrItemNotFound
+	}
 	return nil
 }
 
-func generateID(seq int) string {
-	return time.Now().UTC().Format("20060102150405") + "-" + strconv.Itoa(seq)
+// ensureSubCategory resolves (creating if necessary) the subcategory named
+// subcategory under the category named category, returning the subcategory
+// and category ids. Both names empty yields NULLs. Lookups prefer system
+// defaults (lowest id).
+func ensureSubCategory(tx *sql.Tx, category, subcategory string) (subCategoryID, categoryID *int64, err error) {
+	if category == "" && subcategory == "" {
+		return nil, nil, nil
+	}
+	if subcategory == "" {
+		subcategory = "General"
+	}
+	if category == "" {
+		category = subcategory
+	}
+
+	var catID int64
+	err = tx.QueryRow(`SELECT id FROM Categories WHERE name = $1 ORDER BY id LIMIT 1`, category).Scan(&catID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRow(
+			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES (NULL, $1, now(), now()) RETURNING id`,
+			category,
+		).Scan(&catID)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var subCatID int64
+	err = tx.QueryRow(
+		`SELECT id FROM SubCategories WHERE name = $1 AND categoryId = $2 ORDER BY id LIMIT 1`,
+		subcategory, catID,
+	).Scan(&subCatID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRow(
+			`INSERT INTO SubCategories (userId, name, categoryId, createdAt, updatedAt) VALUES (NULL, $1, $2, now(), now()) RETURNING id`,
+			subcategory, catID,
+		).Scan(&subCatID)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return &subCatID, &catID, nil
+}
+
+// replaceItemTags rewrites the item's tag set: every named tag is resolved
+// (created if necessary), linked to the item's category, and attached to the
+// item, replacing whatever tags it had before.
+func replaceItemTags(tx *sql.Tx, inventoryID int64, tags []model.TagRef, categoryID *int64) error {
+	if _, err := tx.Exec(`DELETE FROM InventoryTags WHERE inventoryId = $1`, inventoryID); err != nil {
+		return err
+	}
+	for _, tag := range tags {
+		tagID, err := ensureTag(tx, tag.Name, categoryID)
+		if err != nil {
+			return err
+		}
+		if tagID == nil {
+			continue
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO InventoryTags (inventoryId, tagId) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			inventoryID, *tagID,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureTag resolves (creating if necessary) the tag by name, returning its
+// id, or NULL for an empty name. When a category id is given, the tag is also
+// linked to that category via CategoryTags so it appears in its tag list.
+func ensureTag(tx *sql.Tx, name string, categoryID *int64) (*int64, error) {
+	if name == "" {
+		return nil, nil
+	}
+
+	var tagID int64
+	err := tx.QueryRow(`SELECT id FROM ItemTags WHERE name = $1 ORDER BY id LIMIT 1`, name).Scan(&tagID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRow(
+			`INSERT INTO ItemTags (userId, name, colour, createdAt, updatedAt) VALUES (NULL, $1, $2, now(), now()) RETURNING id`,
+			name, randomPastelColour(),
+		).Scan(&tagID)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if categoryID != nil {
+		if _, err := tx.Exec(
+			`INSERT INTO CategoryTags (categoryId, tagId) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			*categoryID, tagID,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return &tagID, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanItem(row rowScanner) (model.InventoryItem, error) {
+	var (
+		item   model.InventoryItem
+		id     int64
+		expiry sql.NullTime
+		opens  sql.NullTime
+	)
+	err := row.Scan(
+		&id, &item.Name, &item.Quantity,
+		&item.Location, &item.Notes, &item.ImageURL,
+		&item.Subcategory, &item.Category,
+		&expiry, &opens, &item.CreatedAt, &item.UpdatedAt,
+	)
+	if err != nil {
+		return model.InventoryItem{}, err
+	}
+
+	item.ID = strconv.FormatInt(id, 10)
+	item.Status = deriveStatus(expiry)
+	if expiry.Valid {
+		item.ExpiryDate = expiry.Time.Format("2006-01-02")
+	}
+	if opens.Valid {
+		item.OpensOn = opens.Time.Format("2006-01-02")
+	}
+	if item.Subcategory != "" {
+		item.Subtitle = fmt.Sprintf("%s · %d", item.Subcategory, item.Quantity)
+	}
+	return item, nil
+}
+
+// deriveStatus summarizes how close an item is to its expiry date.
+func deriveStatus(expiry sql.NullTime) string {
+	if !expiry.Valid {
+		return ""
+	}
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	e := expiry.Time
+	expiryDay := time.Date(e.Year(), e.Month(), e.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(expiryDay.Sub(today).Hours() / 24)
+
+	switch {
+	case days < 0:
+		return "Expired"
+	case days == 0:
+		return "Use today"
+	case days == 1:
+		return "1 day left"
+	case days <= 7:
+		return fmt.Sprintf("%d days left", days)
+	default:
+		return ""
+	}
+}
+
+func parseID(id string) (int64, error) {
+	return strconv.ParseInt(id, 10, 64)
 }

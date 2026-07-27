@@ -21,7 +21,7 @@ func NewInventoryController(s service.InventoryService) *InventoryController {
 }
 
 func (c *InventoryController) List(w http.ResponseWriter, r *http.Request) {
-	items, err := c.service.List()
+	items, err := c.service.List(CurrentUser(r.Context()).ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -31,7 +31,7 @@ func (c *InventoryController) List(w http.ResponseWriter, r *http.Request) {
 
 func (c *InventoryController) Get(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	item, err := c.service.Get(id)
+	item, err := c.service.Get(CurrentUser(r.Context()).ID, id)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -46,7 +46,7 @@ func (c *InventoryController) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := c.service.Create(item)
+	created, err := c.service.Create(CurrentUser(r.Context()).ID, item)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -63,7 +63,7 @@ func (c *InventoryController) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	updated, err := c.service.Update(id, item)
+	updated, err := c.service.Update(CurrentUser(r.Context()).ID, id, item)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -73,7 +73,7 @@ func (c *InventoryController) Update(w http.ResponseWriter, r *http.Request) {
 
 func (c *InventoryController) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := c.service.Delete(id); err != nil {
+	if err := c.service.Delete(CurrentUser(r.Context()).ID, id); err != nil {
 		writeServiceError(w, err)
 		return
 	}
