@@ -1,14 +1,17 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
 	"organizing-app-backend/internal/model"
+	"organizing-app-backend/internal/storage"
 )
 
 var ErrItemNotFound = errors.New("inventory item not found")
@@ -27,11 +30,12 @@ type InventoryService interface {
 // schema (Inventories → SubCategories → Categories, ItemTags). Subtitle and
 // status are derived, not stored, so they are ignored on Create/Update.
 type postgresInventoryService struct {
-	db *sql.DB
+	db    *sql.DB
+	store storage.Store
 }
 
-func NewInventoryService(db *sql.DB) InventoryService {
-	return &postgresInventoryService{db: db}
+func NewInventoryService(db *sql.DB, store storage.Store) InventoryService {
+	return &postgresInventoryService{db: db, store: store}
 }
 
 const selectItem = `
@@ -233,18 +237,45 @@ func (s *postgresInventoryService) Delete(userID int64, id string) error {
 		return ErrItemNotFound
 	}
 
-	result, err := s.db.Exec(`DELETE FROM Inventories WHERE id = $1 AND userId = $2`, numericID, userID)
-	if err != nil {
-		return err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	var imageURL string
+	err = s.db.QueryRow(
+		`DELETE FROM Inventories WHERE id = $1 AND userId = $2 RETURNING COALESCE(imageURL, '')`,
+		numericID, userID,
+	).Scan(&imageURL)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrItemNotFound
 	}
+	if err != nil {
+		return err
+	}
+
+	key, ok := uploadKey(imageURL)
+	if !ok {
+		return nil
+	}
+	if err := s.store.Delete(context.Background(), key); err != nil {
+		log.Printf("delete item photo %s (item %d): %v", key, numericID, err)
+	}
 	return nil
+}
+
+// uploadKey extracts the storage key from a stored imageURL, per decision #3:
+// only a same-origin "/uploads/<key>" URL (the exact form minted by
+// UploadController.Upload) yields a key. Anything else — empty, an absolute
+// http(s) URL, or an unrecognized shape — yields no key. A remainder
+// containing "/", "\" or ".." is rejected too, mirroring the guard in
+// UploadController.Serve, so a malformed stored value can never turn into a
+// delete outside the key space.
+func uploadKey(imageURL string) (key string, ok bool) {
+	const prefix = "/uploads/"
+	if !strings.HasPrefix(imageURL, prefix) {
+		return "", false
+	}
+	key = strings.TrimPrefix(imageURL, prefix)
+	if key == "" || strings.ContainsAny(key, "/\\") || strings.Contains(key, "..") {
+		return "", false
+	}
+	return key, true
 }
 
 // ensureSubCategory resolves (creating if necessary) the subcategory named

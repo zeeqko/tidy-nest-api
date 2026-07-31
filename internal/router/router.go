@@ -35,7 +35,7 @@ func New(database *sql.DB, photos storage.Store) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
-	inventoryController := controller.NewInventoryController(service.NewInventoryService(database))
+	inventoryController := controller.NewInventoryController(service.NewInventoryService(database, photos))
 	categoryController := controller.NewCategoryController(service.NewCategoryService(database))
 	authController := controller.NewAuthController(service.NewAuthService(database))
 

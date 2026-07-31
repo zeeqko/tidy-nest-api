@@ -39,6 +39,14 @@ func (s *localStore) Put(_ context.Context, key, _ string, body io.Reader, _ int
 	return dst.Close()
 }
 
+func (s *localStore) Delete(_ context.Context, key string) error {
+	path := filepath.Join(s.dir, filepath.FromSlash(key))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *localStore) Get(_ context.Context, key string) (*Object, error) {
 	path := filepath.Join(s.dir, filepath.FromSlash(key))
 	file, err := os.Open(path)

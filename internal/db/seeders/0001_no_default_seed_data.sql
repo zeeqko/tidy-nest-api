@@ -1,0 +1,7 @@
+-- Intentionally a no-op. This app no longer ships a seeded demo user or
+-- global default categories/tags — every new signup gets its own copy of
+-- the default categories via seedDefaultCategories in
+-- internal/service/default_categories.go instead (see auth_service.go's
+-- Signup). This placeholder exists only because db.go's `//go:embed
+-- seeders/*.sql` requires at least one matching file to compile; delete it
+-- once a real seeder is added back, if one ever is.

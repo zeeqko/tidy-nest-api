@@ -72,6 +72,20 @@ func (s *r2Store) Put(ctx context.Context, key, contentType string, body io.Read
 	return nil
 }
 
+// Delete removes the object at key. S3-compatible DeleteObject already
+// returns success for a key that doesn't exist, so this is idempotent
+// without any extra handling.
+func (s *r2Store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return fmt.Errorf("delete %s: %w", key, err)
+	}
+	return nil
+}
+
 func (s *r2Store) Get(ctx context.Context, key string) (*Object, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),

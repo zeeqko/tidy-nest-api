@@ -25,6 +25,8 @@ type Object struct {
 type Store interface {
 	Put(ctx context.Context, key, contentType string, body io.Reader, size int64) error
 	Get(ctx context.Context, key string) (*Object, error)
+	// Delete removes the object at key. A missing key is treated as success.
+	Delete(ctx context.Context, key string) error
 	// Describe names the backing store for startup logging.
 	Describe() string
 }
