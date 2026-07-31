@@ -1,13 +1,14 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
 	"organizing-app-backend/internal/db"
 	"organizing-app-backend/internal/router"
-	"organizing-app-backend/internal/service"
+	"organizing-app-backend/internal/storage"
 )
 
 func main() {
@@ -29,20 +30,16 @@ func main() {
 		log.Fatalf("seed: %v", err)
 	}
 
-	// Dev convenience: opt-in credentials for the seeded demo user via env.
-	if pw := os.Getenv("DEMO_USER_PASSWORD"); pw != "" {
-		set, err := service.NewAuthService(database).EnsureDemoCredentials("zee@tidynest.local", pw)
-		if err != nil {
-			log.Fatalf("demo credentials: %v", err)
-		}
-		if set {
-			log.Printf("demo user login enabled: zee@tidynest.local")
-		}
+	// Where item photos live: the R2 bucket when configured, else local disk.
+	photos, err := storage.FromEnv(context.Background())
+	if err != nil {
+		log.Fatalf("photo storage: %v", err)
 	}
+	log.Printf("item photos stored in %s", photos.Describe())
 
 	addr := ":8080"
 	log.Printf("organizing-app backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, router.New(database)); err != nil {
+	if err := http.ListenAndServe(addr, router.New(database, photos)); err != nil {
 		log.Fatal(err)
 	}
 }

@@ -21,7 +21,24 @@ var (
 	ErrEmailTaken         = errors.New("an account with this email already exists")
 	ErrInvalidCredentials = errors.New("incorrect email or password")
 	ErrSessionInvalid     = errors.New("session is invalid or expired")
+	// ErrInvalidSignupInput marks a Signup argument-validation failure (bad
+	// name/email/password), surfaced by the controller as 400. Errors
+	// returned for a specific field still carry their own message but all
+	// satisfy errors.Is(err, ErrInvalidSignupInput).
+	ErrInvalidSignupInput = errors.New("invalid signup input")
 )
+
+// signupValidationError carries a message specific to the validation
+// failure while still matching errors.Is(err, ErrInvalidSignupInput). Mirrors
+// duplicateNameError in category_service.go.
+type signupValidationError struct{ message string }
+
+func (e *signupValidationError) Error() string        { return e.message }
+func (e *signupValidationError) Is(target error) bool { return target == ErrInvalidSignupInput }
+
+func newSignupValidationError(message string) error {
+	return &signupValidationError{message: message}
+}
 
 // Argon2id parameters per OWASP's password storage recommendation
 // (m=19 MiB, t=2, p=1).
@@ -46,15 +63,18 @@ func NewAuthService(db *sql.DB) *AuthService {
 	return &AuthService{db: db}
 }
 
-// Signup creates a user with an argon2id-hashed password and returns it.
+// Signup creates a user with an argon2id-hashed password, seeds their own
+// copy of the default categories, and returns the user. The user insert and
+// the seeding run in one transaction, so a seeding failure leaves no user
+// row behind and the email is free to retry immediately.
 func (s *AuthService) Signup(name, email, password string) (model.User, error) {
 	name = strings.TrimSpace(name)
 	email = strings.ToLower(strings.TrimSpace(email))
 	if name == "" || !strings.Contains(email, "@") {
-		return model.User{}, errors.New("name and a valid email are required")
+		return model.User{}, newSignupValidationError("name and a valid email are required")
 	}
 	if len(password) < 8 {
-		return model.User{}, errors.New("password must be at least 8 characters")
+		return model.User{}, newSignupValidationError("password must be at least 8 characters")
 	}
 
 	hash, err := hashPassword(password)
@@ -62,8 +82,14 @@ func (s *AuthService) Signup(name, email, password string) (model.User, error) {
 		return model.User{}, err
 	}
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return model.User{}, err
+	}
+	defer tx.Rollback()
+
 	var u model.User
-	err = s.db.QueryRow(
+	err = tx.QueryRow(
 		`INSERT INTO Users (name, email, passwordHash, createdAt, updatedAt)
 		 VALUES ($1, $2, $3, now(), now())
 		 RETURNING id, name, profileImageURL, currency, createdAt, updatedAt`,
@@ -73,6 +99,14 @@ func (s *AuthService) Signup(name, email, password string) (model.User, error) {
 		if strings.Contains(err.Error(), "users_email_unique") {
 			return model.User{}, ErrEmailTaken
 		}
+		return model.User{}, err
+	}
+
+	if err := seedDefaultCategories(tx, u.ID); err != nil {
+		return model.User{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return model.User{}, err
 	}
 	return u, nil
@@ -205,30 +239,6 @@ func verifyPassword(password, encoded string) (bool, error) {
 
 	got := argon2.IDKey([]byte(password), salt, iterations, memory, parallelism, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
-}
-
-// EnsureDemoCredentials gives the seeded demo user (id 1) a login if it has
-// none yet, so the sample data stays reachable in development. The password
-// comes from DEMO_USER_PASSWORD; when that is unset, the account is left
-// without credentials (nobody can log into it).
-func (s *AuthService) EnsureDemoCredentials(email, password string) (bool, error) {
-	if password == "" {
-		return false, nil
-	}
-	hash, err := hashPassword(password)
-	if err != nil {
-		return false, err
-	}
-	result, err := s.db.Exec(
-		`UPDATE Users SET email = $1, passwordHash = $2, updatedAt = now()
-		 WHERE id = 1 AND passwordHash IS NULL`,
-		strings.ToLower(email), hash,
-	)
-	if err != nil {
-		return false, err
-	}
-	affected, err := result.RowsAffected()
-	return affected > 0, err
 }
 
 // dummyHash is a valid hash used only to equalize login timing for unknown

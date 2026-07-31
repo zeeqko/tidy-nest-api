@@ -27,7 +27,7 @@ type namePayload struct {
 }
 
 func (c *CategoryController) ListCategories(w http.ResponseWriter, r *http.Request) {
-	categories, err := c.service.ListCategories()
+	categories, err := c.service.ListCategories(CurrentUser(r.Context()).ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -40,9 +40,9 @@ func (c *CategoryController) CreateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.CreateCategory(payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.CreateCategory(CurrentUser(r.Context()).ID, payload.Name, payload.Icon, payload.Colour)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeCategoryError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, category)
@@ -57,7 +57,7 @@ func (c *CategoryController) UpdateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.UpdateCategory(id, payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.UpdateCategory(CurrentUser(r.Context()).ID, id, payload.Name, payload.Icon, payload.Colour)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -70,7 +70,7 @@ func (c *CategoryController) DeleteCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteCategory(id); err != nil {
+	if err := c.service.DeleteCategory(CurrentUser(r.Context()).ID, id); err != nil {
 		writeCategoryError(w, err)
 		return
 	}
@@ -86,9 +86,9 @@ func (c *CategoryController) CreateSubCategory(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	subCategory, err := c.service.CreateSubCategory(categoryID, payload.Name)
+	subCategory, err := c.service.CreateSubCategory(CurrentUser(r.Context()).ID, categoryID, payload.Name)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+		writeCategoryError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, subCategory)
@@ -99,7 +99,7 @@ func (c *CategoryController) DeleteSubCategory(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteSubCategory(id); err != nil {
+	if err := c.service.DeleteSubCategory(CurrentUser(r.Context()).ID, id); err != nil {
 		writeCategoryError(w, err)
 		return
 	}
@@ -197,9 +197,12 @@ func parsePathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 }
 
 func writeCategoryError(w http.ResponseWriter, err error) {
-	if errors.Is(err, service.ErrNotFound) {
+	switch {
+	case errors.Is(err, service.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
-		return
+	case errors.Is(err, service.ErrDuplicateName):
+		writeError(w, http.StatusConflict, err)
+	default:
+		writeError(w, http.StatusInternalServerError, err)
 	}
-	writeError(w, http.StatusInternalServerError, err)
 }

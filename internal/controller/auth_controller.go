@@ -43,8 +43,11 @@ func (c *AuthController) Signup(w http.ResponseWriter, r *http.Request) {
 
 	user, err := c.service.Signup(body.Name, body.Email, body.Password)
 	if err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, service.ErrEmailTaken) {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, service.ErrInvalidSignupInput):
+			status = http.StatusBadRequest
+		case errors.Is(err, service.ErrEmailTaken):
 			status = http.StatusConflict
 		}
 		writeError(w, status, err)

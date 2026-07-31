@@ -37,7 +37,7 @@ func NewInventoryService(db *sql.DB) InventoryService {
 const selectItem = `
 SELECT i.id, i.name, i.quantity,
        COALESCE(i.storageLocation, ''), COALESCE(i.notes, ''), COALESCE(i.imageURL, ''),
-       COALESCE(sc.name, ''), COALESCE(c.name, ''),
+       COALESCE(sc.name, ''), COALESCE(c.name, ''), sc.id, c.id,
        i.expiryDate, i.opensOn, i.createdAt, i.updatedAt
 FROM Inventories i
 LEFT JOIN SubCategories sc ON sc.id = i.subCategoryId
@@ -155,7 +155,7 @@ func (s *postgresInventoryService) Create(userID int64, item model.InventoryItem
 	}
 	defer tx.Rollback()
 
-	subCategoryID, categoryID, err := ensureSubCategory(tx, item.Category, item.Subcategory)
+	subCategoryID, categoryID, err := ensureSubCategory(tx, userID, item.Category, item.Subcategory)
 	if err != nil {
 		return model.InventoryItem{}, err
 	}
@@ -195,7 +195,7 @@ func (s *postgresInventoryService) Update(userID int64, id string, item model.In
 	}
 	defer tx.Rollback()
 
-	subCategoryID, categoryID, err := ensureSubCategory(tx, item.Category, item.Subcategory)
+	subCategoryID, categoryID, err := ensureSubCategory(tx, userID, item.Category, item.Subcategory)
 	if err != nil {
 		return model.InventoryItem{}, err
 	}
@@ -248,10 +248,12 @@ func (s *postgresInventoryService) Delete(userID int64, id string) error {
 }
 
 // ensureSubCategory resolves (creating if necessary) the subcategory named
-// subcategory under the category named category, returning the subcategory
-// and category ids. Both names empty yields NULLs. Lookups prefer system
-// defaults (lowest id).
-func ensureSubCategory(tx *sql.Tx, category, subcategory string) (subCategoryID, categoryID *int64, err error) {
+// subcategory under the category named category, both scoped to userID, and
+// returns the subcategory and category ids. Both names empty yields NULLs.
+// Lookups are case-insensitive to match the categories_user_name_unique /
+// subcategories_user_category_name_unique indexes, so an existing category
+// or subcategory is reused regardless of the casing the caller sent.
+func ensureSubCategory(tx *sql.Tx, userID int64, category, subcategory string) (subCategoryID, categoryID *int64, err error) {
 	if category == "" && subcategory == "" {
 		return nil, nil, nil
 	}
@@ -263,11 +265,14 @@ func ensureSubCategory(tx *sql.Tx, category, subcategory string) (subCategoryID,
 	}
 
 	var catID int64
-	err = tx.QueryRow(`SELECT id FROM Categories WHERE name = $1 ORDER BY id LIMIT 1`, category).Scan(&catID)
+	err = tx.QueryRow(
+		`SELECT id FROM Categories WHERE userId = $1 AND lower(name) = lower($2) ORDER BY id LIMIT 1`,
+		userID, category,
+	).Scan(&catID)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = tx.QueryRow(
-			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES (NULL, $1, now(), now()) RETURNING id`,
-			category,
+			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES ($1, $2, now(), now()) RETURNING id`,
+			userID, category,
 		).Scan(&catID)
 	}
 	if err != nil {
@@ -276,13 +281,13 @@ func ensureSubCategory(tx *sql.Tx, category, subcategory string) (subCategoryID,
 
 	var subCatID int64
 	err = tx.QueryRow(
-		`SELECT id FROM SubCategories WHERE name = $1 AND categoryId = $2 ORDER BY id LIMIT 1`,
-		subcategory, catID,
+		`SELECT id FROM SubCategories WHERE userId = $1 AND categoryId = $2 AND lower(name) = lower($3) ORDER BY id LIMIT 1`,
+		userID, catID, subcategory,
 	).Scan(&subCatID)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = tx.QueryRow(
-			`INSERT INTO SubCategories (userId, name, categoryId, createdAt, updatedAt) VALUES (NULL, $1, $2, now(), now()) RETURNING id`,
-			subcategory, catID,
+			`INSERT INTO SubCategories (userId, name, categoryId, createdAt, updatedAt) VALUES ($1, $2, $3, now(), now()) RETURNING id`,
+			userID, subcategory, catID,
 		).Scan(&subCatID)
 	}
 	if err != nil {
@@ -353,15 +358,17 @@ type rowScanner interface {
 
 func scanItem(row rowScanner) (model.InventoryItem, error) {
 	var (
-		item   model.InventoryItem
-		id     int64
-		expiry sql.NullTime
-		opens  sql.NullTime
+		item          model.InventoryItem
+		id            int64
+		subCategoryID sql.NullInt64
+		categoryID    sql.NullInt64
+		expiry        sql.NullTime
+		opens         sql.NullTime
 	)
 	err := row.Scan(
 		&id, &item.Name, &item.Quantity,
 		&item.Location, &item.Notes, &item.ImageURL,
-		&item.Subcategory, &item.Category,
+		&item.Subcategory, &item.Category, &subCategoryID, &categoryID,
 		&expiry, &opens, &item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
@@ -369,6 +376,14 @@ func scanItem(row rowScanner) (model.InventoryItem, error) {
 	}
 
 	item.ID = strconv.FormatInt(id, 10)
+	if subCategoryID.Valid {
+		s := strconv.FormatInt(subCategoryID.Int64, 10)
+		item.SubCategoryID = &s
+	}
+	if categoryID.Valid {
+		s := strconv.FormatInt(categoryID.Int64, 10)
+		item.CategoryID = &s
+	}
 	item.Status = deriveStatus(expiry)
 	if expiry.Valid {
 		item.ExpiryDate = expiry.Time.Format("2006-01-02")

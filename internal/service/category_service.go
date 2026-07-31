@@ -3,20 +3,32 @@ package service
 import (
 	"database/sql"
 	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"organizing-app-backend/internal/model"
 )
 
-var ErrNotFound = errors.New("record not found")
+var (
+	ErrNotFound = errors.New("record not found")
+	// ErrDuplicateName marks a case-insensitive category/subcategory name
+	// collision (Postgres unique-violation, SQLSTATE 23505), surfaced by the
+	// controller as 409. Errors returned for a specific violation carry a
+	// more specific message but still satisfy errors.Is(err, ErrDuplicateName).
+	ErrDuplicateName = errors.New("a category or subcategory with this name already exists")
+)
 
 // CategoryService manages categories, their subcategories, and item tags.
+// Categories and subcategories are scoped to the owning user; tags are not
+// yet (see PLAN.md T1 open question #6) and remain global.
 type CategoryService interface {
-	ListCategories() ([]model.Category, error)
-	CreateCategory(name, icon, colour string) (model.Category, error)
-	UpdateCategory(id int64, name, icon, colour string) (model.Category, error)
-	DeleteCategory(id int64) error
-	CreateSubCategory(categoryID int64, name string) (model.SubCategory, error)
-	DeleteSubCategory(id int64) error
+	ListCategories(userID int64) ([]model.Category, error)
+	CreateCategory(userID int64, name, icon, colour string) (model.Category, error)
+	UpdateCategory(userID, id int64, name, icon, colour string) (model.Category, error)
+	DeleteCategory(userID, id int64) error
+	CreateSubCategory(userID, categoryID int64, name string) (model.SubCategory, error)
+	DeleteSubCategory(userID, id int64) error
 	ListTags() ([]model.ItemTag, error)
 	CreateTag(name, colour string) (model.ItemTag, error)
 	DeleteTag(id int64) error
@@ -24,6 +36,34 @@ type CategoryService interface {
 	AttachTag(categoryID int64, name, colour string) (model.ItemTag, error)
 	// DetachTag removes the category-tag link only; the tag itself survives.
 	DetachTag(categoryID, tagID int64) error
+}
+
+// duplicateNameError carries a message specific to the violated constraint
+// while still matching errors.Is(err, ErrDuplicateName).
+type duplicateNameError struct{ message string }
+
+func (e *duplicateNameError) Error() string        { return e.message }
+func (e *duplicateNameError) Is(target error) bool { return target == ErrDuplicateName }
+
+func newDuplicateNameError(message string) error {
+	return &duplicateNameError{message: message}
+}
+
+// isDuplicateNameViolation reports whether err is a Postgres unique-violation
+// (SQLSTATE 23505), i.e. the categories_user_name_unique or
+// subcategories_user_category_name_unique index rejected the write.
+func isDuplicateNameViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// isForeignKeyViolation reports whether err is a Postgres foreign-key
+// violation (SQLSTATE 23503). Used to catch the narrow TOCTOU window between
+// CreateSubCategory's ownership check and its insert: if the category is
+// deleted in between, the insert fails this way instead of racily succeeding.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
 }
 
 type postgresCategoryService struct {
@@ -34,9 +74,10 @@ func NewCategoryService(db *sql.DB) CategoryService {
 	return &postgresCategoryService{db: db}
 }
 
-func (s *postgresCategoryService) ListCategories() ([]model.Category, error) {
+func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category, error) {
 	rows, err := s.db.Query(
-		`SELECT id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt FROM Categories ORDER BY id`,
+		`SELECT id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt FROM Categories WHERE userId = $1 ORDER BY id`,
+		userID,
 	)
 	if err != nil {
 		return nil, err
@@ -61,7 +102,8 @@ func (s *postgresCategoryService) ListCategories() ([]model.Category, error) {
 	}
 
 	subRows, err := s.db.Query(
-		`SELECT id, userId, name, icon, categoryId, createdAt, updatedAt FROM SubCategories ORDER BY id`,
+		`SELECT id, userId, name, icon, categoryId, createdAt, updatedAt FROM SubCategories WHERE userId = $1 ORDER BY id`,
+		userID,
 	)
 	if err != nil {
 		return nil, err
@@ -84,7 +126,7 @@ func (s *postgresCategoryService) ListCategories() ([]model.Category, error) {
 	if err := s.hydrateTags(categories, byID); err != nil {
 		return nil, err
 	}
-	if err := s.hydrateItemStats(categories, byID); err != nil {
+	if err := s.hydrateItemStats(categories, byID, userID); err != nil {
 		return nil, err
 	}
 	return categories, nil
@@ -131,13 +173,16 @@ func (s *postgresCategoryService) hydrateTags(categories []model.Category, byID 
 	return nil
 }
 
-// hydrateItemStats fills each category's item count and distinct locations.
-func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, byID map[int64]int) error {
+// hydrateItemStats fills each category's item count and distinct locations,
+// scoped to userID's own inventory items.
+func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, byID map[int64]int, userID int64) error {
 	countRows, err := s.db.Query(
 		`SELECT sc.categoryId, COUNT(*)
 		 FROM Inventories i
 		 JOIN SubCategories sc ON sc.id = i.subCategoryId
+		 WHERE i.userId = $1
 		 GROUP BY sc.categoryId`,
+		userID,
 	)
 	if err != nil {
 		return err
@@ -162,8 +207,9 @@ func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, 
 		`SELECT DISTINCT sc.categoryId, i.storageLocation
 		 FROM Inventories i
 		 JOIN SubCategories sc ON sc.id = i.subCategoryId
-		 WHERE i.storageLocation IS NOT NULL AND i.storageLocation <> ''
+		 WHERE i.userId = $1 AND i.storageLocation IS NOT NULL AND i.storageLocation <> ''
 		 ORDER BY sc.categoryId, i.storageLocation`,
+		userID,
 	)
 	if err != nil {
 		return err
@@ -183,23 +229,31 @@ func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, 
 	return locationRows.Err()
 }
 
-func (s *postgresCategoryService) CreateCategory(name, icon, colour string) (model.Category, error) {
+func (s *postgresCategoryService) CreateCategory(userID int64, name, icon, colour string) (model.Category, error) {
 	var c model.Category
 	err := s.db.QueryRow(
 		`INSERT INTO Categories (userId, name, icon, colour, createdAt, updatedAt)
-		 VALUES (NULL, $1, NULLIF($2, ''), NULLIF($3, ''), now(), now())
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), now(), now())
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
-		name, icon, colour,
+		userID, name, icon, colour,
 	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt)
+	if err != nil {
+		if isDuplicateNameViolation(err) {
+			return model.Category{}, newDuplicateNameError(fmt.Sprintf("a category named %q already exists", name))
+		}
+		return model.Category{}, err
+	}
 	c.SubCategories = make([]model.SubCategory, 0)
 	c.Tags = make([]model.ItemTag, 0)
 	c.Locations = make([]string, 0)
-	return c, err
+	return c, nil
 }
 
 // UpdateCategory sets the category's name and, when non-empty, its icon and
-// colour. Empty icon/colour leave the stored values unchanged.
-func (s *postgresCategoryService) UpdateCategory(id int64, name, icon, colour string) (model.Category, error) {
+// colour. Empty icon/colour leave the stored values unchanged. Only the
+// owning user's category can be updated; any other id (missing or belonging
+// to someone else) reports ErrNotFound.
+func (s *postgresCategoryService) UpdateCategory(userID, id int64, name, icon, colour string) (model.Category, error) {
 	var c model.Category
 	err := s.db.QueryRow(
 		`UPDATE Categories
@@ -207,36 +261,63 @@ func (s *postgresCategoryService) UpdateCategory(id int64, name, icon, colour st
 		     icon = COALESCE(NULLIF($2, ''), icon),
 		     colour = COALESCE(NULLIF($3, ''), colour),
 		     updatedAt = now()
-		 WHERE id = $4
+		 WHERE id = $4 AND userId = $5
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
-		name, icon, colour, id,
+		name, icon, colour, id, userID,
 	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return model.Category{}, ErrNotFound
 	}
+	if err != nil {
+		if isDuplicateNameViolation(err) {
+			return model.Category{}, newDuplicateNameError(fmt.Sprintf("a category named %q already exists", name))
+		}
+		return model.Category{}, err
+	}
 	c.SubCategories = make([]model.SubCategory, 0)
 	c.Tags = make([]model.ItemTag, 0)
 	c.Locations = make([]string, 0)
-	return c, err
+	return c, nil
 }
 
-func (s *postgresCategoryService) DeleteCategory(id int64) error {
-	return s.deleteByID(`DELETE FROM Categories WHERE id = $1`, id)
+func (s *postgresCategoryService) DeleteCategory(userID, id int64) error {
+	return s.deleteByID(`DELETE FROM Categories WHERE id = $1 AND userId = $2`, id, userID)
 }
 
-func (s *postgresCategoryService) CreateSubCategory(categoryID int64, name string) (model.SubCategory, error) {
+// CreateSubCategory verifies categoryID belongs to userID before inserting,
+// so a subcategory can never be attached to another user's category.
+func (s *postgresCategoryService) CreateSubCategory(userID, categoryID int64, name string) (model.SubCategory, error) {
+	var exists bool
+	if err := s.db.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1 AND userId = $2)`, categoryID, userID,
+	).Scan(&exists); err != nil {
+		return model.SubCategory{}, err
+	}
+	if !exists {
+		return model.SubCategory{}, ErrNotFound
+	}
+
 	var sc model.SubCategory
 	err := s.db.QueryRow(
 		`INSERT INTO SubCategories (userId, name, categoryId, createdAt, updatedAt)
-		 VALUES (NULL, $1, $2, now(), now())
+		 VALUES ($1, $2, $3, now(), now())
 		 RETURNING id, userId, name, icon, categoryId, createdAt, updatedAt`,
-		name, categoryID,
+		userID, name, categoryID,
 	).Scan(&sc.ID, &sc.UserID, &sc.Name, &sc.Icon, &sc.CategoryID, &sc.CreatedAt, &sc.UpdatedAt)
-	return sc, err
+	if err != nil {
+		if isDuplicateNameViolation(err) {
+			return model.SubCategory{}, newDuplicateNameError(fmt.Sprintf("a subcategory named %q already exists in this category", name))
+		}
+		if isForeignKeyViolation(err) {
+			return model.SubCategory{}, ErrNotFound
+		}
+		return model.SubCategory{}, err
+	}
+	return sc, nil
 }
 
-func (s *postgresCategoryService) DeleteSubCategory(id int64) error {
-	return s.deleteByID(`DELETE FROM SubCategories WHERE id = $1`, id)
+func (s *postgresCategoryService) DeleteSubCategory(userID, id int64) error {
+	return s.deleteByID(`DELETE FROM SubCategories WHERE id = $1 AND userId = $2`, id, userID)
 }
 
 func (s *postgresCategoryService) ListTags() ([]model.ItemTag, error) {
@@ -355,8 +436,8 @@ func (s *postgresCategoryService) DeleteTag(id int64) error {
 	return s.deleteByID(`DELETE FROM ItemTags WHERE id = $1`, id)
 }
 
-func (s *postgresCategoryService) deleteByID(query string, id int64) error {
-	result, err := s.db.Exec(query, id)
+func (s *postgresCategoryService) deleteByID(query string, args ...any) error {
+	result, err := s.db.Exec(query, args...)
 	if err != nil {
 		return err
 	}

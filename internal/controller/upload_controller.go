@@ -6,21 +6,23 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"organizing-app-backend/internal/storage"
 )
 
-// UploadController stores user-submitted item photos on disk and serves them
-// back. Files get random names, so URLs are unguessable and never collide.
+// UploadController stores user-submitted item photos in the configured object
+// store (R2 in deployed environments) and streams them back out. Files get
+// random names, so URLs are unguessable and never collide.
 type UploadController struct {
-	dir string
+	store storage.Store
 }
 
-func NewUploadController(dir string) *UploadController {
-	return &UploadController{dir: dir}
+func NewUploadController(store storage.Store) *UploadController {
+	return &UploadController{store: store}
 }
 
 const maxUploadBytes = 15 << 20 // phone camera photos, with headroom
@@ -39,7 +41,7 @@ var imageExtensions = map[string]string{
 func (c *UploadController) Upload(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
-	file, _, err := r.FormFile("image")
+	file, header, err := r.FormFile("image")
 	if err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("missing image file"))
 		return
@@ -52,9 +54,15 @@ func (c *UploadController) Upload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ext, ok := imageExtensions[http.DetectContentType(head[:n])]
+	contentType := http.DetectContentType(head[:n])
+	ext, ok := imageExtensions[contentType]
 	if !ok {
 		writeError(w, http.StatusBadRequest, errors.New("unsupported image type"))
+		return
+	}
+	// Rewind past the sniffed header so the whole file gets stored.
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -63,39 +71,44 @@ func (c *UploadController) Upload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	name := hex.EncodeToString(nameBytes) + ext
+	key := hex.EncodeToString(nameBytes) + ext
 
-	if err := os.MkdirAll(c.dir, 0o755); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	dst, err := os.Create(filepath.Join(c.dir, name))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	defer dst.Close()
-
-	if _, err := dst.Write(head[:n]); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if _, err := io.Copy(dst, file); err != nil {
+	// The multipart layer knows the exact size, which R2 needs up front: its
+	// S3 endpoint does not accept the SDK's chunked streaming uploads.
+	if err := c.store.Put(r.Context(), key, contentType, file, header.Size); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{"url": "/uploads/" + name})
+	writeJSON(w, http.StatusCreated, map[string]string{"url": "/uploads/" + key})
 }
 
-// Serve returns a previously uploaded image by filename.
+// Serve streams a previously uploaded image back to the browser. Photos stay
+// private: they are fetched from the bucket with the backend's credentials and
+// only handed to a caller that passed the session check on this route.
 func (c *UploadController) Serve(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
 		http.NotFound(w, r)
 		return
 	}
+
+	object, err := c.store.Get(r.Context(), name)
+	if errors.Is(err, storage.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer object.Body.Close()
+
+	w.Header().Set("Content-Type", object.ContentType)
+	if object.Size > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
+	}
 	// Filenames are random and never reused, so the content is immutable.
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
-	http.ServeFile(w, r, filepath.Join(c.dir, name))
+	io.Copy(w, object.Body)
 }
