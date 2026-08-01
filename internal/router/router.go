@@ -1,16 +1,19 @@
 package router
 
 import (
+	"context"
 	"database/sql"
 	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"organizing-app-backend/internal/ai"
 	"organizing-app-backend/internal/controller"
 	"organizing-app-backend/internal/service"
 	"organizing-app-backend/internal/storage"
@@ -30,16 +33,24 @@ func init() {
 // New builds the application's HTTP router, wiring each route to its
 // controller. Controllers own the request/response handling; services own
 // the business logic.
-func New(database *sql.DB, photos storage.Store) http.Handler {
+func New(database *sql.DB, photos storage.Store, aiClient *ai.Client) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
+	categoryService := service.NewCategoryService(database)
+
 	inventoryController := controller.NewInventoryController(service.NewInventoryService(database, photos))
-	categoryController := controller.NewCategoryController(service.NewCategoryService(database))
+	categoryController := controller.NewCategoryController(categoryService)
 	authController := controller.NewAuthController(service.NewAuthService(database))
+	recognitionController := controller.NewRecognitionController(aiClient, categoryService)
 
 	uploadController := controller.NewUploadController(photos)
+
+	// Unauthenticated: k8s liveness/readiness probes hit this. It checks the
+	// DB connection (not just "the process is running") so a pod with a
+	// severed DB link gets pulled out of rotation instead of serving 500s.
+	r.Get("/healthz", healthzHandler(database))
 
 	// Public: signup and login only. Everything else requires a session.
 	r.Route("/api/auth", func(r chi.Router) {
@@ -77,6 +88,13 @@ func New(database *sql.DB, photos storage.Store) http.Handler {
 		r.Post("/api/uploads", uploadController.Upload)
 		r.Get("/uploads/{name}", uploadController.Serve)
 
+		// AI Recognition add-item flow: classifies a photo into one of the
+		// user's existing categories plus a suggested item name. Never
+		// touches storage — it's a separate call from /api/uploads so a
+		// photo used only to try recognition (never saved) is never
+		// persisted.
+		r.Post("/api/recognize", recognitionController.Recognize)
+
 		r.Route("/api/tags", func(r chi.Router) {
 			r.Get("/", categoryController.ListTags)
 			r.Post("/", categoryController.CreateTag)
@@ -92,6 +110,21 @@ func New(database *sql.DB, photos storage.Store) http.Handler {
 	r.Get("/*", staticFileHandler(staticDir()))
 
 	return r
+}
+
+func healthzHandler(database *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := database.PingContext(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("db unreachable"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}
 }
 
 // staticDir is where the built client lives, relative to the backend

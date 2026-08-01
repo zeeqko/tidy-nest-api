@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 
+	"organizing-app-backend/internal/ai"
 	"organizing-app-backend/internal/db"
 	"organizing-app-backend/internal/router"
 	"organizing-app-backend/internal/storage"
@@ -37,9 +38,14 @@ func main() {
 	}
 	log.Printf("item photos stored in %s", photos.Describe())
 
+	aiClient := ai.NewClientFromEnv()
+	if aiClient == nil {
+		log.Printf("GEMINI_API_KEY not set — AI item recognition disabled")
+	}
+
 	addr := ":8080"
 	log.Printf("organizing-app backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, router.New(database, photos)); err != nil {
+	if err := http.ListenAndServe(addr, router.New(database, photos, aiClient)); err != nil {
 		log.Fatal(err)
 	}
 }
