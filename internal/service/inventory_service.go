@@ -45,7 +45,7 @@ SELECT i.id, i.name, i.quantity,
        i.expiryDate, i.opensOn, i.createdAt, i.updatedAt
 FROM Inventories i
 LEFT JOIN SubCategories sc ON sc.id = i.subCategoryId
-LEFT JOIN Categories c ON c.id = sc.categoryId
+LEFT JOIN Categories c ON c.id = i.categoryId
 WHERE i.userId = $1`
 
 func (s *postgresInventoryService) List(userID int64) ([]model.InventoryItem, error) {
@@ -166,10 +166,10 @@ func (s *postgresInventoryService) Create(userID int64, item model.InventoryItem
 
 	var id int64
 	err = tx.QueryRow(
-		`INSERT INTO Inventories (userId, name, subCategoryId, quantity, storageLocation, notes, imageURL, expiryDate, opensOn, createdAt, updatedAt)
-		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, '')::date, NULLIF($9, '')::date, now(), now())
+		`INSERT INTO Inventories (userId, name, subCategoryId, categoryId, quantity, storageLocation, notes, imageURL, expiryDate, opensOn, createdAt, updatedAt)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), NULLIF($9, '')::date, NULLIF($10, '')::date, now(), now())
 		 RETURNING id`,
-		userID, item.Name, subCategoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn,
+		userID, item.Name, subCategoryID, categoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn,
 	).Scan(&id)
 	if err != nil {
 		return model.InventoryItem{}, err
@@ -206,10 +206,10 @@ func (s *postgresInventoryService) Update(userID int64, id string, item model.In
 
 	result, err := tx.Exec(
 		`UPDATE Inventories
-		 SET name = $1, subCategoryId = $2, quantity = $3, storageLocation = $4, notes = $5, imageURL = NULLIF($6, ''),
-		     expiryDate = NULLIF($7, '')::date, opensOn = NULLIF($8, '')::date, updatedAt = now()
-		 WHERE id = $9 AND userId = $10`,
-		item.Name, subCategoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn, numericID, userID,
+		 SET name = $1, subCategoryId = $2, categoryId = $3, quantity = $4, storageLocation = $5, notes = $6, imageURL = NULLIF($7, ''),
+		     expiryDate = NULLIF($8, '')::date, opensOn = NULLIF($9, '')::date, updatedAt = now()
+		 WHERE id = $10 AND userId = $11`,
+		item.Name, subCategoryID, categoryID, item.Quantity, item.Location, item.Notes, item.ImageURL, item.ExpiryDate, item.OpensOn, numericID, userID,
 	)
 	if err != nil {
 		return model.InventoryItem{}, err

@@ -155,7 +155,7 @@ func (c *CategoryController) DetachTag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, service.ErrNotFound)
 		return
 	}
-	if err := c.service.DetachTag(categoryID, tagID); err != nil {
+	if err := c.service.DetachTag(CurrentUser(r.Context()).ID, categoryID, tagID); err != nil {
 		writeCategoryError(w, err)
 		return
 	}

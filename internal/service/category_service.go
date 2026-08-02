@@ -1,13 +1,16 @@
 package service
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"organizing-app-backend/internal/model"
+	"organizing-app-backend/internal/storage"
 )
 
 var (
@@ -34,8 +37,9 @@ type CategoryService interface {
 	DeleteTag(id int64) error
 	// AttachTag links a tag (created by name if missing) to a category.
 	AttachTag(categoryID int64, name, colour string) (model.ItemTag, error)
-	// DetachTag removes the category-tag link only; the tag itself survives.
-	DetachTag(categoryID, tagID int64) error
+	// DetachTag removes the tag from the category (and from userID's items
+	// filed under it); the tag itself, and its use elsewhere, survives.
+	DetachTag(userID, categoryID, tagID int64) error
 }
 
 // duplicateNameError carries a message specific to the violated constraint
@@ -67,11 +71,12 @@ func isForeignKeyViolation(err error) bool {
 }
 
 type postgresCategoryService struct {
-	db *sql.DB
+	db    *sql.DB
+	store storage.Store
 }
 
-func NewCategoryService(db *sql.DB) CategoryService {
-	return &postgresCategoryService{db: db}
+func NewCategoryService(db *sql.DB, store storage.Store) CategoryService {
+	return &postgresCategoryService{db: db, store: store}
 }
 
 func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category, error) {
@@ -174,14 +179,15 @@ func (s *postgresCategoryService) hydrateTags(categories []model.Category, byID 
 }
 
 // hydrateItemStats fills each category's item count and distinct locations,
-// scoped to userID's own inventory items.
+// scoped to userID's own inventory items. Both are keyed off Inventories'
+// own categoryId column (not subCategoryId), so an item whose subcategory
+// was since deleted still counts toward its category.
 func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, byID map[int64]int, userID int64) error {
 	countRows, err := s.db.Query(
-		`SELECT sc.categoryId, COUNT(*)
-		 FROM Inventories i
-		 JOIN SubCategories sc ON sc.id = i.subCategoryId
-		 WHERE i.userId = $1
-		 GROUP BY sc.categoryId`,
+		`SELECT categoryId, COUNT(*)
+		 FROM Inventories
+		 WHERE userId = $1 AND categoryId IS NOT NULL
+		 GROUP BY categoryId`,
 		userID,
 	)
 	if err != nil {
@@ -204,11 +210,10 @@ func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, 
 	}
 
 	locationRows, err := s.db.Query(
-		`SELECT DISTINCT sc.categoryId, i.storageLocation
-		 FROM Inventories i
-		 JOIN SubCategories sc ON sc.id = i.subCategoryId
-		 WHERE i.userId = $1 AND i.storageLocation IS NOT NULL AND i.storageLocation <> ''
-		 ORDER BY sc.categoryId, i.storageLocation`,
+		`SELECT DISTINCT categoryId, storageLocation
+		 FROM Inventories
+		 WHERE userId = $1 AND categoryId IS NOT NULL AND storageLocation IS NOT NULL AND storageLocation <> ''
+		 ORDER BY categoryId, storageLocation`,
 		userID,
 	)
 	if err != nil {
@@ -280,8 +285,55 @@ func (s *postgresCategoryService) UpdateCategory(userID, id int64, name, icon, c
 	return c, nil
 }
 
+// DeleteCategory deletes the category, which cascades (see migration 0012)
+// to its subcategories and, crucially, to every item filed directly under it
+// (Inventories.categoryId ON DELETE CASCADE) — items don't outlive their
+// category the way they survive a subcategory or tag deletion. Since that
+// cascade bypasses InventoryService.Delete, any item photos are cleaned up
+// here instead.
 func (s *postgresCategoryService) DeleteCategory(userID, id int64) error {
-	return s.deleteByID(`DELETE FROM Categories WHERE id = $1 AND userId = $2`, id, userID)
+	imageURLs, err := s.itemImageURLs(userID, id)
+	if err != nil {
+		return err
+	}
+	if err := s.deleteByID(`DELETE FROM Categories WHERE id = $1 AND userId = $2`, id, userID); err != nil {
+		return err
+	}
+	s.cleanupImages(imageURLs)
+	return nil
+}
+
+func (s *postgresCategoryService) itemImageURLs(userID, categoryID int64) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT imageURL FROM Inventories WHERE userId = $1 AND categoryId = $2 AND imageURL IS NOT NULL`,
+		userID, categoryID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	urls := make([]string, 0)
+	for rows.Next() {
+		var url string
+		if err := rows.Scan(&url); err != nil {
+			return nil, err
+		}
+		urls = append(urls, url)
+	}
+	return urls, rows.Err()
+}
+
+func (s *postgresCategoryService) cleanupImages(imageURLs []string) {
+	for _, url := range imageURLs {
+		key, ok := uploadKey(url)
+		if !ok {
+			continue
+		}
+		if err := s.store.Delete(context.Background(), key); err != nil {
+			log.Printf("delete item photo %s (category cascade): %v", key, err)
+		}
+	}
 }
 
 // CreateSubCategory verifies categoryID belongs to userID before inserting,
@@ -417,7 +469,23 @@ func (s *postgresCategoryService) AttachTag(categoryID int64, name, colour strin
 	return t, linkRows.Err()
 }
 
-func (s *postgresCategoryService) DetachTag(categoryID, tagID int64) error {
+// DetachTag unlinks the tag from the category and strips it from userID's
+// items filed under that category — otherwise an item would keep showing a
+// tag its category no longer offers, the same inconsistency deleting a
+// subcategory used to leave behind before Inventories.categoryId existed
+// (see migration 0012). The tag row itself, and its links to other
+// categories/users, are untouched.
+func (s *postgresCategoryService) DetachTag(userID, categoryID, tagID int64) error {
+	var owned bool
+	if err := s.db.QueryRow(
+		`SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1 AND userId = $2)`, categoryID, userID,
+	).Scan(&owned); err != nil {
+		return err
+	}
+	if !owned {
+		return ErrNotFound
+	}
+
 	result, err := s.db.Exec(`DELETE FROM CategoryTags WHERE categoryId = $1 AND tagId = $2`, categoryID, tagID)
 	if err != nil {
 		return err
@@ -428,6 +496,15 @@ func (s *postgresCategoryService) DetachTag(categoryID, tagID int64) error {
 	}
 	if affected == 0 {
 		return ErrNotFound
+	}
+
+	if _, err := s.db.Exec(
+		`DELETE FROM InventoryTags
+		 WHERE tagId = $1
+		   AND inventoryId IN (SELECT id FROM Inventories WHERE userId = $2 AND categoryId = $3)`,
+		tagID, userID, categoryID,
+	); err != nil {
+		return err
 	}
 	return nil
 }

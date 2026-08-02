@@ -16,8 +16,11 @@ type InventoryItem struct {
 	Subtitle    string `json:"subtitle"`
 	Category    string `json:"category"`
 	Subcategory string `json:"subcategory"`
-	// CategoryID/SubCategoryID mirror Category.id (string form); nil when the
-	// item's subcategory (or its parent category) no longer exists.
+	// CategoryID/SubCategoryID mirror Category.id/SubCategory.id (string
+	// form). They're independent: deleting a subcategory clears only
+	// SubCategoryID (the item keeps its category), while deleting a category
+	// deletes the item itself, so a live item's CategoryID is nil only when
+	// it was never assigned one.
 	CategoryID    *string  `json:"categoryId"`
 	SubCategoryID *string  `json:"subCategoryId"`
 	Location      string   `json:"location"`
