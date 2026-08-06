@@ -27,7 +27,7 @@ type namePayload struct {
 }
 
 func (c *CategoryController) ListCategories(w http.ResponseWriter, r *http.Request) {
-	categories, err := c.service.ListCategories(CurrentUser(r.Context()).ID)
+	categories, err := c.service.ListCategories(r.Context(), CurrentUser(r.Context()).ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -40,7 +40,7 @@ func (c *CategoryController) CreateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.CreateCategory(CurrentUser(r.Context()).ID, payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.CreateCategory(r.Context(), CurrentUser(r.Context()).ID, payload.Name, payload.Icon, payload.Colour)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -57,7 +57,7 @@ func (c *CategoryController) UpdateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.UpdateCategory(CurrentUser(r.Context()).ID, id, payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.UpdateCategory(r.Context(), CurrentUser(r.Context()).ID, id, payload.Name, payload.Icon, payload.Colour)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -70,7 +70,7 @@ func (c *CategoryController) DeleteCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteCategory(CurrentUser(r.Context()).ID, id); err != nil {
+	if err := c.service.DeleteCategory(r.Context(), CurrentUser(r.Context()).ID, id); err != nil {
 		writeCategoryError(w, err)
 		return
 	}
@@ -86,7 +86,7 @@ func (c *CategoryController) CreateSubCategory(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	subCategory, err := c.service.CreateSubCategory(CurrentUser(r.Context()).ID, categoryID, payload.Name)
+	subCategory, err := c.service.CreateSubCategory(r.Context(), CurrentUser(r.Context()).ID, categoryID, payload.Name)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -99,7 +99,7 @@ func (c *CategoryController) DeleteSubCategory(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteSubCategory(CurrentUser(r.Context()).ID, id); err != nil {
+	if err := c.service.DeleteSubCategory(r.Context(), CurrentUser(r.Context()).ID, id); err != nil {
 		writeCategoryError(w, err)
 		return
 	}
@@ -107,7 +107,7 @@ func (c *CategoryController) DeleteSubCategory(w http.ResponseWriter, r *http.Re
 }
 
 func (c *CategoryController) ListTags(w http.ResponseWriter, r *http.Request) {
-	tags, err := c.service.ListTags()
+	tags, err := c.service.ListTags(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -120,7 +120,7 @@ func (c *CategoryController) CreateTag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tag, err := c.service.CreateTag(payload.Name, payload.Colour)
+	tag, err := c.service.CreateTag(r.Context(), payload.Name, payload.Colour)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -137,7 +137,7 @@ func (c *CategoryController) AttachTag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tag, err := c.service.AttachTag(categoryID, payload.Name, payload.Colour)
+	tag, err := c.service.AttachTag(r.Context(), categoryID, payload.Name, payload.Colour)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -155,7 +155,7 @@ func (c *CategoryController) DetachTag(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, service.ErrNotFound)
 		return
 	}
-	if err := c.service.DetachTag(CurrentUser(r.Context()).ID, categoryID, tagID); err != nil {
+	if err := c.service.DetachTag(r.Context(), CurrentUser(r.Context()).ID, categoryID, tagID); err != nil {
 		writeCategoryError(w, err)
 		return
 	}
@@ -167,7 +167,7 @@ func (c *CategoryController) DeleteTag(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := c.service.DeleteTag(id); err != nil {
+	if err := c.service.DeleteTag(r.Context(), id); err != nil {
 		writeCategoryError(w, err)
 		return
 	}

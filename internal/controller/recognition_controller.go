@@ -64,7 +64,7 @@ func (c *RecognitionController) Recognize(w http.ResponseWriter, r *http.Request
 	}
 	imageData := append(head[:n], rest...)
 
-	categories, err := c.categoryService.ListCategories(CurrentUser(r.Context()).ID)
+	categories, err := c.categoryService.ListCategories(r.Context(), CurrentUser(r.Context()).ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

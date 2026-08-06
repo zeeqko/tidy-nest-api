@@ -41,7 +41,7 @@ func (c *AuthController) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := c.service.Signup(body.Name, body.Email, body.Password)
+	user, err := c.service.Signup(r.Context(), body.Name, body.Email, body.Password)
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
@@ -68,7 +68,7 @@ func (c *AuthController) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := c.service.Login(body.Email, body.Password)
+	user, err := c.service.Login(r.Context(), body.Email, body.Password)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidCredentials) {
 			writeError(w, http.StatusUnauthorized, err)
@@ -87,7 +87,7 @@ func (c *AuthController) Login(w http.ResponseWriter, r *http.Request) {
 
 func (c *AuthController) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		if err := c.service.DeleteSession(cookie.Value); err != nil {
+		if err := c.service.DeleteSession(r.Context(), cookie.Value); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -117,7 +117,7 @@ func (c *AuthController) RequireAuth(next http.Handler) http.Handler {
 			writeError(w, http.StatusUnauthorized, errors.New("not signed in"))
 			return
 		}
-		user, err := c.service.UserForToken(cookie.Value)
+		user, err := c.service.UserForToken(r.Context(), cookie.Value)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, errors.New("not signed in"))
 			return
@@ -134,7 +134,7 @@ func CurrentUser(ctx context.Context) model.User {
 }
 
 func (c *AuthController) startSession(w http.ResponseWriter, r *http.Request, userID int64) error {
-	token, expires, err := c.service.CreateSession(userID)
+	token, expires, err := c.service.CreateSession(r.Context(), userID)
 	if err != nil {
 		return err
 	}

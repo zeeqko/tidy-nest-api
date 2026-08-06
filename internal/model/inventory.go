@@ -30,6 +30,9 @@ type InventoryItem struct {
 	Notes         string   `json:"notes,omitempty"`
 	// URL of the item's photo as served by this backend (e.g. /uploads/ab12.jpg).
 	ImageURL string `json:"imageURL,omitempty"`
+	// URL of a background-removed copy of ImageURL, generated once at
+	// add-item time and reused by outfit surfaces. Empty when not generated.
+	CutoutURL string `json:"cutoutURL,omitempty"`
 	// Optional dates in YYYY-MM-DD form; empty means not set.
 	ExpiryDate string    `json:"expiryDate,omitempty"`
 	OpensOn    string    `json:"opensOn,omitempty"`

@@ -1,8 +1,10 @@
 package service
 
 import (
-	"database/sql"
+	"context"
 	"errors"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // defaultSubCategorySeed is one subcategory row to create under its parent
@@ -101,10 +103,11 @@ var defaultCategorySeeds = []defaultCategorySeed{
 // signup never duplicates a global tag row (mirrors AttachTag's semantics in
 // category_service.go). Runs inside tx so a failure rolls back the whole
 // signup with it.
-func seedDefaultCategories(tx *sql.Tx, userID int64) error {
+func seedDefaultCategories(ctx context.Context, tx pgx.Tx, userID int64) error {
 	for _, dc := range defaultCategorySeeds {
 		var categoryID int64
 		if err := tx.QueryRow(
+			ctx,
 			`INSERT INTO Categories (userId, name, icon, reminderOnExpiry, createdAt, updatedAt)
 			 VALUES ($1, $2, $3, $4, now(), now())
 			 RETURNING id`,
@@ -115,6 +118,7 @@ func seedDefaultCategories(tx *sql.Tx, userID int64) error {
 
 		for _, sc := range dc.subCategories {
 			if _, err := tx.Exec(
+				ctx,
 				`INSERT INTO SubCategories (userId, name, icon, categoryId, createdAt, updatedAt)
 				 VALUES ($1, $2, $3, $4, now(), now())`,
 				userID, sc.name, sc.icon, categoryID,
@@ -124,7 +128,7 @@ func seedDefaultCategories(tx *sql.Tx, userID int64) error {
 		}
 
 		for _, tag := range dc.tags {
-			if err := attachDefaultTag(tx, categoryID, tag.name, tag.colour); err != nil {
+			if err := attachDefaultTag(ctx, tx, categoryID, tag.name, tag.colour); err != nil {
 				return err
 			}
 		}
@@ -143,26 +147,28 @@ func seedDefaultCategories(tx *sql.Tx, userID int64) error {
 // CONFLICT clause, so the losing transaction's INSERT is a no-op (RETURNING
 // yields no row) rather than a duplicate row or an error, and it falls back
 // to the SELECT to pick up the winning transaction's committed row.
-func attachDefaultTag(tx *sql.Tx, categoryID int64, name, colour string) error {
+func attachDefaultTag(ctx context.Context, tx pgx.Tx, categoryID int64, name, colour string) error {
 	var tagID int64
 	err := tx.QueryRow(
+		ctx,
 		`INSERT INTO ItemTags (userId, name, colour, createdAt, updatedAt)
 		 VALUES (NULL, $1, $2, now(), now())
 		 ON CONFLICT (lower(name)) WHERE userId IS NULL DO NOTHING
 		 RETURNING id`,
 		name, colour,
 	).Scan(&tagID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		// Exact-case, not scoped to userId IS NULL: matches AttachTag's
 		// existing find-or-create SELECT (category_service.go) so this stays
 		// consistent with the rest of the codebase's tag lookups.
-		err = tx.QueryRow(`SELECT id FROM ItemTags WHERE name = $1 ORDER BY id LIMIT 1`, name).Scan(&tagID)
+		err = tx.QueryRow(ctx, `SELECT id FROM ItemTags WHERE name = $1 ORDER BY id LIMIT 1`, name).Scan(&tagID)
 	}
 	if err != nil {
 		return err
 	}
 
 	_, err = tx.Exec(
+		ctx,
 		`INSERT INTO CategoryTags (categoryId, tagId) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 		categoryID, tagID,
 	)

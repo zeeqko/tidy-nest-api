@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"database/sql"
 	"mime"
 	"net/http"
 	"os"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"organizing-app-backend/internal/ai"
 	"organizing-app-backend/internal/controller"
@@ -33,7 +33,7 @@ func init() {
 // New builds the application's HTTP router, wiring each route to its
 // controller. Controllers own the request/response handling; services own
 // the business logic.
-func New(database *sql.DB, photos storage.Store, aiClient *ai.Client) http.Handler {
+func New(database *pgxpool.Pool, photos storage.Store, aiClient *ai.Client) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -41,6 +41,7 @@ func New(database *sql.DB, photos storage.Store, aiClient *ai.Client) http.Handl
 	categoryService := service.NewCategoryService(database, photos)
 
 	inventoryController := controller.NewInventoryController(service.NewInventoryService(database, photos))
+	lookController := controller.NewLookController(service.NewLookService(database))
 	categoryController := controller.NewCategoryController(categoryService)
 	authController := controller.NewAuthController(service.NewAuthService(database))
 	recognitionController := controller.NewRecognitionController(aiClient, categoryService)
@@ -69,6 +70,14 @@ func New(database *sql.DB, photos storage.Store, aiClient *ai.Client) http.Handl
 			r.Get("/{id}", inventoryController.Get)
 			r.Put("/{id}", inventoryController.Update)
 			r.Delete("/{id}", inventoryController.Delete)
+		})
+
+		r.Route("/api/looks", func(r chi.Router) {
+			r.Get("/", lookController.List)
+			r.Post("/", lookController.Create)
+			r.Get("/{id}", lookController.Get)
+			r.Put("/{id}", lookController.Update)
+			r.Delete("/{id}", lookController.Delete)
 		})
 
 		r.Route("/api/categories", func(r chi.Router) {
@@ -112,12 +121,12 @@ func New(database *sql.DB, photos storage.Store, aiClient *ai.Client) http.Handl
 	return r
 }
 
-func healthzHandler(database *sql.DB) http.HandlerFunc {
+func healthzHandler(database *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
 
-		if err := database.PingContext(ctx); err != nil {
+		if err := database.Ping(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte("db unreachable"))
 			return

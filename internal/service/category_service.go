@@ -2,12 +2,13 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"organizing-app-backend/internal/model"
 	"organizing-app-backend/internal/storage"
@@ -26,20 +27,20 @@ var (
 // Categories and subcategories are scoped to the owning user; tags are not
 // yet (see PLAN.md T1 open question #6) and remain global.
 type CategoryService interface {
-	ListCategories(userID int64) ([]model.Category, error)
-	CreateCategory(userID int64, name, icon, colour string) (model.Category, error)
-	UpdateCategory(userID, id int64, name, icon, colour string) (model.Category, error)
-	DeleteCategory(userID, id int64) error
-	CreateSubCategory(userID, categoryID int64, name string) (model.SubCategory, error)
-	DeleteSubCategory(userID, id int64) error
-	ListTags() ([]model.ItemTag, error)
-	CreateTag(name, colour string) (model.ItemTag, error)
-	DeleteTag(id int64) error
+	ListCategories(ctx context.Context, userID int64) ([]model.Category, error)
+	CreateCategory(ctx context.Context, userID int64, name, icon, colour string) (model.Category, error)
+	UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string) (model.Category, error)
+	DeleteCategory(ctx context.Context, userID, id int64) error
+	CreateSubCategory(ctx context.Context, userID, categoryID int64, name string) (model.SubCategory, error)
+	DeleteSubCategory(ctx context.Context, userID, id int64) error
+	ListTags(ctx context.Context) ([]model.ItemTag, error)
+	CreateTag(ctx context.Context, name, colour string) (model.ItemTag, error)
+	DeleteTag(ctx context.Context, id int64) error
 	// AttachTag links a tag (created by name if missing) to a category.
-	AttachTag(categoryID int64, name, colour string) (model.ItemTag, error)
+	AttachTag(ctx context.Context, categoryID int64, name, colour string) (model.ItemTag, error)
 	// DetachTag removes the tag from the category (and from userID's items
 	// filed under it); the tag itself, and its use elsewhere, survives.
-	DetachTag(userID, categoryID, tagID int64) error
+	DetachTag(ctx context.Context, userID, categoryID, tagID int64) error
 }
 
 // duplicateNameError carries a message specific to the violated constraint
@@ -71,16 +72,17 @@ func isForeignKeyViolation(err error) bool {
 }
 
 type postgresCategoryService struct {
-	db    *sql.DB
+	db    *pgxpool.Pool
 	store storage.Store
 }
 
-func NewCategoryService(db *sql.DB, store storage.Store) CategoryService {
+func NewCategoryService(db *pgxpool.Pool, store storage.Store) CategoryService {
 	return &postgresCategoryService{db: db, store: store}
 }
 
-func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category, error) {
+func (s *postgresCategoryService) ListCategories(ctx context.Context, userID int64) ([]model.Category, error) {
 	rows, err := s.db.Query(
+		ctx,
 		`SELECT id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt FROM Categories WHERE userId = $1 ORDER BY id`,
 		userID,
 	)
@@ -107,6 +109,7 @@ func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category
 	}
 
 	subRows, err := s.db.Query(
+		ctx,
 		`SELECT id, userId, name, icon, categoryId, createdAt, updatedAt FROM SubCategories WHERE userId = $1 ORDER BY id`,
 		userID,
 	)
@@ -128,10 +131,10 @@ func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category
 		return nil, err
 	}
 
-	if err := s.hydrateTags(categories, byID); err != nil {
+	if err := s.hydrateTags(ctx, categories, byID); err != nil {
 		return nil, err
 	}
-	if err := s.hydrateItemStats(categories, byID, userID); err != nil {
+	if err := s.hydrateItemStats(ctx, categories, byID, userID); err != nil {
 		return nil, err
 	}
 	return categories, nil
@@ -139,8 +142,9 @@ func (s *postgresCategoryService) ListCategories(userID int64) ([]model.Category
 
 // hydrateTags nests each category's tags (with their full category link list)
 // so clients get everything from the categories endpoint alone.
-func (s *postgresCategoryService) hydrateTags(categories []model.Category, byID map[int64]int) error {
+func (s *postgresCategoryService) hydrateTags(ctx context.Context, categories []model.Category, byID map[int64]int) error {
 	rows, err := s.db.Query(
+		ctx,
 		`SELECT ct.categoryId, t.id, t.userId, t.name, t.colour, t.createdAt, t.updatedAt
 		 FROM CategoryTags ct
 		 JOIN ItemTags t ON t.id = ct.tagId
@@ -182,8 +186,9 @@ func (s *postgresCategoryService) hydrateTags(categories []model.Category, byID 
 // scoped to userID's own inventory items. Both are keyed off Inventories'
 // own categoryId column (not subCategoryId), so an item whose subcategory
 // was since deleted still counts toward its category.
-func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, byID map[int64]int, userID int64) error {
+func (s *postgresCategoryService) hydrateItemStats(ctx context.Context, categories []model.Category, byID map[int64]int, userID int64) error {
 	countRows, err := s.db.Query(
+		ctx,
 		`SELECT categoryId, COUNT(*)
 		 FROM Inventories
 		 WHERE userId = $1 AND categoryId IS NOT NULL
@@ -210,6 +215,7 @@ func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, 
 	}
 
 	locationRows, err := s.db.Query(
+		ctx,
 		`SELECT DISTINCT categoryId, storageLocation
 		 FROM Inventories
 		 WHERE userId = $1 AND categoryId IS NOT NULL AND storageLocation IS NOT NULL AND storageLocation <> ''
@@ -234,9 +240,10 @@ func (s *postgresCategoryService) hydrateItemStats(categories []model.Category, 
 	return locationRows.Err()
 }
 
-func (s *postgresCategoryService) CreateCategory(userID int64, name, icon, colour string) (model.Category, error) {
+func (s *postgresCategoryService) CreateCategory(ctx context.Context, userID int64, name, icon, colour string) (model.Category, error) {
 	var c model.Category
 	err := s.db.QueryRow(
+		ctx,
 		`INSERT INTO Categories (userId, name, icon, colour, createdAt, updatedAt)
 		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), now(), now())
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
@@ -258,9 +265,10 @@ func (s *postgresCategoryService) CreateCategory(userID int64, name, icon, colou
 // colour. Empty icon/colour leave the stored values unchanged. Only the
 // owning user's category can be updated; any other id (missing or belonging
 // to someone else) reports ErrNotFound.
-func (s *postgresCategoryService) UpdateCategory(userID, id int64, name, icon, colour string) (model.Category, error) {
+func (s *postgresCategoryService) UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string) (model.Category, error) {
 	var c model.Category
 	err := s.db.QueryRow(
+		ctx,
 		`UPDATE Categories
 		 SET name = $1,
 		     icon = COALESCE(NULLIF($2, ''), icon),
@@ -270,7 +278,7 @@ func (s *postgresCategoryService) UpdateCategory(userID, id int64, name, icon, c
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
 		name, icon, colour, id, userID,
 	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Category{}, ErrNotFound
 	}
 	if err != nil {
@@ -291,20 +299,21 @@ func (s *postgresCategoryService) UpdateCategory(userID, id int64, name, icon, c
 // category the way they survive a subcategory or tag deletion. Since that
 // cascade bypasses InventoryService.Delete, any item photos are cleaned up
 // here instead.
-func (s *postgresCategoryService) DeleteCategory(userID, id int64) error {
-	imageURLs, err := s.itemImageURLs(userID, id)
+func (s *postgresCategoryService) DeleteCategory(ctx context.Context, userID, id int64) error {
+	imageURLs, err := s.itemImageURLs(ctx, userID, id)
 	if err != nil {
 		return err
 	}
-	if err := s.deleteByID(`DELETE FROM Categories WHERE id = $1 AND userId = $2`, id, userID); err != nil {
+	if err := s.deleteByID(ctx, `DELETE FROM Categories WHERE id = $1 AND userId = $2`, id, userID); err != nil {
 		return err
 	}
 	s.cleanupImages(imageURLs)
 	return nil
 }
 
-func (s *postgresCategoryService) itemImageURLs(userID, categoryID int64) ([]string, error) {
+func (s *postgresCategoryService) itemImageURLs(ctx context.Context, userID, categoryID int64) ([]string, error) {
 	rows, err := s.db.Query(
+		ctx,
 		`SELECT imageURL FROM Inventories WHERE userId = $1 AND categoryId = $2 AND imageURL IS NOT NULL`,
 		userID, categoryID,
 	)
@@ -338,9 +347,10 @@ func (s *postgresCategoryService) cleanupImages(imageURLs []string) {
 
 // CreateSubCategory verifies categoryID belongs to userID before inserting,
 // so a subcategory can never be attached to another user's category.
-func (s *postgresCategoryService) CreateSubCategory(userID, categoryID int64, name string) (model.SubCategory, error) {
+func (s *postgresCategoryService) CreateSubCategory(ctx context.Context, userID, categoryID int64, name string) (model.SubCategory, error) {
 	var exists bool
 	if err := s.db.QueryRow(
+		ctx,
 		`SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1 AND userId = $2)`, categoryID, userID,
 	).Scan(&exists); err != nil {
 		return model.SubCategory{}, err
@@ -351,6 +361,7 @@ func (s *postgresCategoryService) CreateSubCategory(userID, categoryID int64, na
 
 	var sc model.SubCategory
 	err := s.db.QueryRow(
+		ctx,
 		`INSERT INTO SubCategories (userId, name, categoryId, createdAt, updatedAt)
 		 VALUES ($1, $2, $3, now(), now())
 		 RETURNING id, userId, name, icon, categoryId, createdAt, updatedAt`,
@@ -368,12 +379,12 @@ func (s *postgresCategoryService) CreateSubCategory(userID, categoryID int64, na
 	return sc, nil
 }
 
-func (s *postgresCategoryService) DeleteSubCategory(userID, id int64) error {
-	return s.deleteByID(`DELETE FROM SubCategories WHERE id = $1 AND userId = $2`, id, userID)
+func (s *postgresCategoryService) DeleteSubCategory(ctx context.Context, userID, id int64) error {
+	return s.deleteByID(ctx, `DELETE FROM SubCategories WHERE id = $1 AND userId = $2`, id, userID)
 }
 
-func (s *postgresCategoryService) ListTags() ([]model.ItemTag, error) {
-	rows, err := s.db.Query(`SELECT id, userId, name, colour, createdAt, updatedAt FROM ItemTags ORDER BY id`)
+func (s *postgresCategoryService) ListTags(ctx context.Context) ([]model.ItemTag, error) {
+	rows, err := s.db.Query(ctx, `SELECT id, userId, name, colour, createdAt, updatedAt FROM ItemTags ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +405,7 @@ func (s *postgresCategoryService) ListTags() ([]model.ItemTag, error) {
 		return nil, err
 	}
 
-	linkRows, err := s.db.Query(`SELECT tagId, categoryId FROM CategoryTags ORDER BY categoryId`)
+	linkRows, err := s.db.Query(ctx, `SELECT tagId, categoryId FROM CategoryTags ORDER BY categoryId`)
 	if err != nil {
 		return nil, err
 	}
@@ -412,12 +423,13 @@ func (s *postgresCategoryService) ListTags() ([]model.ItemTag, error) {
 	return tags, linkRows.Err()
 }
 
-func (s *postgresCategoryService) CreateTag(name, colour string) (model.ItemTag, error) {
+func (s *postgresCategoryService) CreateTag(ctx context.Context, name, colour string) (model.ItemTag, error) {
 	if colour == "" {
 		colour = randomPastelColour()
 	}
 	var t model.ItemTag
 	err := s.db.QueryRow(
+		ctx,
 		`INSERT INTO ItemTags (userId, name, colour, createdAt, updatedAt)
 		 VALUES (NULL, $1, $2, now(), now())
 		 RETURNING id, userId, name, colour, createdAt, updatedAt`,
@@ -427,9 +439,9 @@ func (s *postgresCategoryService) CreateTag(name, colour string) (model.ItemTag,
 	return t, err
 }
 
-func (s *postgresCategoryService) AttachTag(categoryID int64, name, colour string) (model.ItemTag, error) {
+func (s *postgresCategoryService) AttachTag(ctx context.Context, categoryID int64, name, colour string) (model.ItemTag, error) {
 	var exists bool
-	if err := s.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1)`, categoryID).Scan(&exists); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1)`, categoryID).Scan(&exists); err != nil {
 		return model.ItemTag{}, err
 	}
 	if !exists {
@@ -437,23 +449,24 @@ func (s *postgresCategoryService) AttachTag(categoryID int64, name, colour strin
 	}
 
 	var t model.ItemTag
-	err := s.db.QueryRow(`SELECT id, userId, name, colour, createdAt, updatedAt FROM ItemTags WHERE name = $1 ORDER BY id LIMIT 1`, name).
+	err := s.db.QueryRow(ctx, `SELECT id, userId, name, colour, createdAt, updatedAt FROM ItemTags WHERE name = $1 ORDER BY id LIMIT 1`, name).
 		Scan(&t.ID, &t.UserID, &t.Name, &t.Colour, &t.CreatedAt, &t.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		t, err = s.CreateTag(name, colour)
+	if errors.Is(err, pgx.ErrNoRows) {
+		t, err = s.CreateTag(ctx, name, colour)
 	}
 	if err != nil {
 		return model.ItemTag{}, err
 	}
 
 	if _, err := s.db.Exec(
+		ctx,
 		`INSERT INTO CategoryTags (categoryId, tagId) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 		categoryID, t.ID,
 	); err != nil {
 		return model.ItemTag{}, err
 	}
 
-	linkRows, err := s.db.Query(`SELECT categoryId FROM CategoryTags WHERE tagId = $1 ORDER BY categoryId`, t.ID)
+	linkRows, err := s.db.Query(ctx, `SELECT categoryId FROM CategoryTags WHERE tagId = $1 ORDER BY categoryId`, t.ID)
 	if err != nil {
 		return model.ItemTag{}, err
 	}
@@ -475,9 +488,10 @@ func (s *postgresCategoryService) AttachTag(categoryID int64, name, colour strin
 // subcategory used to leave behind before Inventories.categoryId existed
 // (see migration 0012). The tag row itself, and its links to other
 // categories/users, are untouched.
-func (s *postgresCategoryService) DetachTag(userID, categoryID, tagID int64) error {
+func (s *postgresCategoryService) DetachTag(ctx context.Context, userID, categoryID, tagID int64) error {
 	var owned bool
 	if err := s.db.QueryRow(
+		ctx,
 		`SELECT EXISTS (SELECT 1 FROM Categories WHERE id = $1 AND userId = $2)`, categoryID, userID,
 	).Scan(&owned); err != nil {
 		return err
@@ -486,19 +500,16 @@ func (s *postgresCategoryService) DetachTag(userID, categoryID, tagID int64) err
 		return ErrNotFound
 	}
 
-	result, err := s.db.Exec(`DELETE FROM CategoryTags WHERE categoryId = $1 AND tagId = $2`, categoryID, tagID)
+	result, err := s.db.Exec(ctx, `DELETE FROM CategoryTags WHERE categoryId = $1 AND tagId = $2`, categoryID, tagID)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if result.RowsAffected() == 0 {
 		return ErrNotFound
 	}
 
 	if _, err := s.db.Exec(
+		ctx,
 		`DELETE FROM InventoryTags
 		 WHERE tagId = $1
 		   AND inventoryId IN (SELECT id FROM Inventories WHERE userId = $2 AND categoryId = $3)`,
@@ -509,20 +520,16 @@ func (s *postgresCategoryService) DetachTag(userID, categoryID, tagID int64) err
 	return nil
 }
 
-func (s *postgresCategoryService) DeleteTag(id int64) error {
-	return s.deleteByID(`DELETE FROM ItemTags WHERE id = $1`, id)
+func (s *postgresCategoryService) DeleteTag(ctx context.Context, id int64) error {
+	return s.deleteByID(ctx, `DELETE FROM ItemTags WHERE id = $1`, id)
 }
 
-func (s *postgresCategoryService) deleteByID(query string, args ...any) error {
-	result, err := s.db.Exec(query, args...)
+func (s *postgresCategoryService) deleteByID(ctx context.Context, query string, args ...any) error {
+	result, err := s.db.Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
+	if result.RowsAffected() == 0 {
 		return ErrNotFound
 	}
 	return nil

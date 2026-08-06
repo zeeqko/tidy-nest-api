@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/argon2"
 
 	"organizing-app-backend/internal/model"
@@ -56,10 +59,10 @@ const (
 // as argon2id hashes; session cookies carry an opaque random token whose
 // SHA-256 (never the token itself) is stored server-side.
 type AuthService struct {
-	db *sql.DB
+	db *pgxpool.Pool
 }
 
-func NewAuthService(db *sql.DB) *AuthService {
+func NewAuthService(db *pgxpool.Pool) *AuthService {
 	return &AuthService{db: db}
 }
 
@@ -67,7 +70,7 @@ func NewAuthService(db *sql.DB) *AuthService {
 // copy of the default categories, and returns the user. The user insert and
 // the seeding run in one transaction, so a seeding failure leaves no user
 // row behind and the email is free to retry immediately.
-func (s *AuthService) Signup(name, email, password string) (model.User, error) {
+func (s *AuthService) Signup(ctx context.Context, name, email, password string) (model.User, error) {
 	name = strings.TrimSpace(name)
 	email = strings.ToLower(strings.TrimSpace(email))
 	if name == "" || !strings.Contains(email, "@") {
@@ -82,14 +85,15 @@ func (s *AuthService) Signup(name, email, password string) (model.User, error) {
 		return model.User{}, err
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return model.User{}, err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var u model.User
 	err = tx.QueryRow(
+		ctx,
 		`INSERT INTO Users (name, email, passwordHash, createdAt, updatedAt)
 		 VALUES ($1, $2, $3, now(), now())
 		 RETURNING id, name, profileImageURL, currency, createdAt, updatedAt`,
@@ -102,18 +106,18 @@ func (s *AuthService) Signup(name, email, password string) (model.User, error) {
 		return model.User{}, err
 	}
 
-	if err := seedDefaultCategories(tx, u.ID); err != nil {
+	if err := seedDefaultCategories(ctx, tx, u.ID); err != nil {
 		return model.User{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return model.User{}, err
 	}
 	return u, nil
 }
 
 // Login verifies the credentials and returns the matching user.
-func (s *AuthService) Login(email, password string) (model.User, error) {
+func (s *AuthService) Login(ctx context.Context, email, password string) (model.User, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	var (
@@ -121,11 +125,12 @@ func (s *AuthService) Login(email, password string) (model.User, error) {
 		hash sql.NullString
 	)
 	err := s.db.QueryRow(
+		ctx,
 		`SELECT id, name, profileImageURL, currency, createdAt, updatedAt, passwordHash
 		 FROM Users WHERE lower(email) = $1`,
 		email,
 	).Scan(&u.ID, &u.Name, &u.ProfileImageURL, &u.Currency, &u.CreatedAt, &u.UpdatedAt, &hash)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && !hash.Valid) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !hash.Valid) {
 		// Burn a hash anyway so a missing account takes as long as a wrong
 		// password (limits user enumeration via timing).
 		verifyPassword(password, dummyHash)
@@ -147,7 +152,7 @@ func (s *AuthService) Login(email, password string) (model.User, error) {
 
 // CreateSession mints an opaque token for the user, stores its SHA-256 hash,
 // and returns the raw token (only ever held by the client) with its expiry.
-func (s *AuthService) CreateSession(userID int64) (token string, expires time.Time, err error) {
+func (s *AuthService) CreateSession(ctx context.Context, userID int64) (token string, expires time.Time, err error) {
 	raw := make([]byte, 32)
 	if _, err = rand.Read(raw); err != nil {
 		return "", time.Time{}, err
@@ -156,6 +161,7 @@ func (s *AuthService) CreateSession(userID int64) (token string, expires time.Ti
 	expires = time.Now().Add(sessionTTL)
 
 	_, err = s.db.Exec(
+		ctx,
 		`INSERT INTO Sessions (userId, tokenHash, expiresAt) VALUES ($1, $2, $3)`,
 		userID, hashToken(token), expires,
 	)
@@ -166,27 +172,28 @@ func (s *AuthService) CreateSession(userID int64) (token string, expires time.Ti
 }
 
 // UserForToken resolves a session token to its user, rejecting expired sessions.
-func (s *AuthService) UserForToken(token string) (model.User, error) {
+func (s *AuthService) UserForToken(ctx context.Context, token string) (model.User, error) {
 	if token == "" {
 		return model.User{}, ErrSessionInvalid
 	}
 
 	var u model.User
 	err := s.db.QueryRow(
+		ctx,
 		`SELECT u.id, u.name, u.profileImageURL, u.currency, u.createdAt, u.updatedAt
 		 FROM Sessions s JOIN Users u ON u.id = s.userId
 		 WHERE s.tokenHash = $1 AND s.expiresAt > now()`,
 		hashToken(token),
 	).Scan(&u.ID, &u.Name, &u.ProfileImageURL, &u.Currency, &u.CreatedAt, &u.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return model.User{}, ErrSessionInvalid
 	}
 	return u, err
 }
 
 // DeleteSession revokes one session (logout). Unknown tokens are a no-op.
-func (s *AuthService) DeleteSession(token string) error {
-	_, err := s.db.Exec(`DELETE FROM Sessions WHERE tokenHash = $1`, hashToken(token))
+func (s *AuthService) DeleteSession(ctx context.Context, token string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM Sessions WHERE tokenHash = $1`, hashToken(token))
 	return err
 }
 

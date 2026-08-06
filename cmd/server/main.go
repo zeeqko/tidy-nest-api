@@ -13,26 +13,28 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		dsn = "postgres://postgres:postgres@localhost:5432/organizing_app?sslmode=disable"
 	}
 
-	database, err := db.Open(dsn)
+	pool, err := db.Open(ctx, dsn)
 	if err != nil {
 		log.Fatalf("connect to postgres: %v", err)
 	}
-	defer database.Close()
+	defer pool.Close()
 
-	if err := db.Migrate(database); err != nil {
+	if err := db.Migrate(ctx, pool); err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
-	if err := db.Seed(database); err != nil {
+	if err := db.Seed(ctx, pool); err != nil {
 		log.Fatalf("seed: %v", err)
 	}
 
 	// Where item photos live: the R2 bucket when configured, else local disk.
-	photos, err := storage.FromEnv(context.Background())
+	photos, err := storage.FromEnv(ctx)
 	if err != nil {
 		log.Fatalf("photo storage: %v", err)
 	}
@@ -45,7 +47,7 @@ func main() {
 
 	addr := ":8080"
 	log.Printf("organizing-app backend listening on %s", addr)
-	if err := http.ListenAndServe(addr, router.New(database, photos, aiClient)); err != nil {
+	if err := http.ListenAndServe(addr, router.New(pool, photos, aiClient)); err != nil {
 		log.Fatal(err)
 	}
 }
