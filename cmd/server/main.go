@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"organizing-app-backend/internal/ai"
 	"organizing-app-backend/internal/db"
@@ -12,7 +14,38 @@ import (
 	"organizing-app-backend/internal/storage"
 )
 
+// loadDotEnv reads KEY=VALUE pairs from a local .env file (dev convenience
+// only) and applies them via os.Setenv, skipping any key already set in the
+// real environment so k8s/docker env vars always win. Missing file is not an
+// error — .env is optional and never present in deployed environments.
+func loadDotEnv(path string) {
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if _, alreadySet := os.LookupEnv(key); alreadySet {
+			continue
+		}
+		os.Setenv(key, strings.TrimSpace(value))
+	}
+}
+
 func main() {
+	loadDotEnv(".env")
+
 	ctx := context.Background()
 
 	dsn := os.Getenv("DATABASE_URL")
