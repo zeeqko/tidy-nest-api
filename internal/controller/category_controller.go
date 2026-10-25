@@ -32,7 +32,7 @@ func (c *CategoryController) ListCategories(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, categories)
+	writeJSONWithETag(w, r, categories)
 }
 
 func (c *CategoryController) CreateCategory(w http.ResponseWriter, r *http.Request) {

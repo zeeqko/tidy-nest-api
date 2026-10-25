@@ -26,7 +26,7 @@ func (c *LookController) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, looks)
+	writeJSONWithETag(w, r, looks)
 }
 
 func (c *LookController) Get(w http.ResponseWriter, r *http.Request) {

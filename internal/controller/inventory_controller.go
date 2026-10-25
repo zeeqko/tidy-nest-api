@@ -26,7 +26,7 @@ func (c *InventoryController) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSONWithETag(w, r, items)
 }
 
 func (c *InventoryController) Get(w http.ResponseWriter, r *http.Request) {
