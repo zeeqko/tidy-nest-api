@@ -15,15 +15,18 @@ type User struct {
 }
 
 type Category struct {
-	ID               int64         `json:"id"`
-	UserID           *int64        `json:"userId"`
-	Name             string        `json:"name"`
-	Icon             *string       `json:"icon"`
-	Colour           *string       `json:"colour"`
-	ReminderOnExpiry bool          `json:"reminderOnExpiry"`
-	CreatedAt        time.Time     `json:"createdAt"`
-	UpdatedAt        time.Time     `json:"updatedAt"`
-	SubCategories    []SubCategory `json:"subCategories"`
+	ID               int64   `json:"id"`
+	UserID           *int64  `json:"userId"`
+	Name             string  `json:"name"`
+	Icon             *string `json:"icon"`
+	Colour           *string `json:"colour"`
+	ReminderOnExpiry bool    `json:"reminderOnExpiry"`
+	// StylebookGroup is the Stylebook section this category feeds (see
+	// stylebook_group.go); nil means hidden from the Stylebook.
+	StylebookGroup *string       `json:"stylebookGroup"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	UpdatedAt      time.Time     `json:"updatedAt"`
+	SubCategories  []SubCategory `json:"subCategories"`
 	// Tags offered in this category (via CategoryTags), nested so clients
 	// need a single request.
 	Tags []ItemTag `json:"tags"`

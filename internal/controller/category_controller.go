@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"organizing-app-backend/internal/model"
 	"organizing-app-backend/internal/service"
 )
 
@@ -24,6 +25,10 @@ type namePayload struct {
 	Name   string `json:"name"`
 	Icon   string `json:"icon"`
 	Colour string `json:"colour"`
+	// StylebookGroup is a pointer so an omitted field (nil, leave unchanged)
+	// differs from "" (hidden). Only category update reads it; create always
+	// uses the name-based default.
+	StylebookGroup *string `json:"stylebookGroup"`
 }
 
 func (c *CategoryController) ListCategories(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +62,7 @@ func (c *CategoryController) UpdateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.UpdateCategory(r.Context(), CurrentUser(r.Context()).ID, id, payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.UpdateCategory(r.Context(), CurrentUser(r.Context()).ID, id, payload.Name, payload.Icon, payload.Colour, payload.StylebookGroup)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
@@ -182,6 +187,10 @@ func decodeNamed(w http.ResponseWriter, r *http.Request) (namePayload, bool) {
 	}
 	if payload.Name == "" {
 		writeError(w, http.StatusBadRequest, errors.New("name is required"))
+		return namePayload{}, false
+	}
+	if g := payload.StylebookGroup; g != nil && *g != "" && !model.IsValidStylebookGroup(*g) {
+		writeError(w, http.StatusBadRequest, errors.New("invalid stylebookGroup"))
 		return namePayload{}, false
 	}
 	return payload, true

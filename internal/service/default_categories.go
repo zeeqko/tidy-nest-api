@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+
+	"organizing-app-backend/internal/model"
 )
 
 // defaultSubCategorySeed is one subcategory row to create under its parent
@@ -108,10 +110,10 @@ func seedDefaultCategories(ctx context.Context, tx pgx.Tx, userID int64) error {
 		var categoryID int64
 		if err := tx.QueryRow(
 			ctx,
-			`INSERT INTO Categories (userId, name, icon, reminderOnExpiry, createdAt, updatedAt)
-			 VALUES ($1, $2, $3, $4, now(), now())
+			`INSERT INTO Categories (userId, name, icon, reminderOnExpiry, stylebookGroup, createdAt, updatedAt)
+			 VALUES ($1, $2, $3, $4, NULLIF($5, ''), now(), now())
 			 RETURNING id`,
-			userID, dc.name, dc.icon, dc.reminderOnExpiry,
+			userID, dc.name, dc.icon, dc.reminderOnExpiry, model.DefaultStylebookGroup(dc.name),
 		).Scan(&categoryID); err != nil {
 			return err
 		}

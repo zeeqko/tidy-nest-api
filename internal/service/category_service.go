@@ -29,7 +29,7 @@ var (
 type CategoryService interface {
 	ListCategories(ctx context.Context, userID int64) ([]model.Category, error)
 	CreateCategory(ctx context.Context, userID int64, name, icon, colour string) (model.Category, error)
-	UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string) (model.Category, error)
+	UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string, group *string) (model.Category, error)
 	DeleteCategory(ctx context.Context, userID, id int64) error
 	CreateSubCategory(ctx context.Context, userID, categoryID int64, name string) (model.SubCategory, error)
 	DeleteSubCategory(ctx context.Context, userID, id int64) error
@@ -83,7 +83,7 @@ func NewCategoryService(db *pgxpool.Pool, store storage.Store) CategoryService {
 func (s *postgresCategoryService) ListCategories(ctx context.Context, userID int64) ([]model.Category, error) {
 	rows, err := s.db.Query(
 		ctx,
-		`SELECT id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt FROM Categories WHERE userId = $1 ORDER BY id`,
+		`SELECT id, userId, name, icon, colour, reminderOnExpiry, stylebookGroup, createdAt, updatedAt FROM Categories WHERE userId = $1 ORDER BY id`,
 		userID,
 	)
 	if err != nil {
@@ -95,7 +95,7 @@ func (s *postgresCategoryService) ListCategories(ctx context.Context, userID int
 	byID := make(map[int64]int)
 	for rows.Next() {
 		var c model.Category
-		if err := rows.Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.StylebookGroup, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		c.SubCategories = make([]model.SubCategory, 0)
@@ -246,9 +246,9 @@ func (s *postgresCategoryService) CreateCategory(ctx context.Context, userID int
 		ctx,
 		`INSERT INTO Categories (userId, name, icon, colour, createdAt, updatedAt)
 		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), now(), now())
-		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
-		userID, name, icon, colour,
-	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt)
+		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, stylebookGroup, createdAt, updatedAt`,
+		userID, name, icon, colour, model.DefaultStylebookGroup(name),
+	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.StylebookGroup, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		if isDuplicateNameViolation(err) {
 			return model.Category{}, newDuplicateNameError(fmt.Sprintf("a category named %q already exists", name))
@@ -262,22 +262,29 @@ func (s *postgresCategoryService) CreateCategory(ctx context.Context, userID int
 }
 
 // UpdateCategory sets the category's name and, when non-empty, its icon and
-// colour. Empty icon/colour leave the stored values unchanged. Only the
+// colour. Empty icon/colour leave the stored values unchanged. group nil
+// leaves stylebookGroup unchanged, a pointer to "" sets it NULL (hidden), and
+// any other value sets it (the caller validates). Only the
 // owning user's category can be updated; any other id (missing or belonging
 // to someone else) reports ErrNotFound.
-func (s *postgresCategoryService) UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string) (model.Category, error) {
+func (s *postgresCategoryService) UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string, group *string) (model.Category, error) {
 	var c model.Category
+	setGroup, groupValue := group != nil, ""
+	if group != nil {
+		groupValue = *group
+	}
 	err := s.db.QueryRow(
 		ctx,
 		`UPDATE Categories
 		 SET name = $1,
 		     icon = COALESCE(NULLIF($2, ''), icon),
 		     colour = COALESCE(NULLIF($3, ''), colour),
+			     stylebookGroup = CASE WHEN $6::boolean THEN NULLIF($7::text, '') ELSE stylebookGroup END,
 		     updatedAt = now()
 		 WHERE id = $4 AND userId = $5
-		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, createdAt, updatedAt`,
-		name, icon, colour, id, userID,
-	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.CreatedAt, &c.UpdatedAt)
+		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, stylebookGroup, createdAt, updatedAt`,
+		name, icon, colour, id, userID, setGroup, groupValue,
+	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.StylebookGroup, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return model.Category{}, ErrNotFound
 	}
