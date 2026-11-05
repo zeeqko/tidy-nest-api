@@ -28,7 +28,7 @@ var (
 // yet (see PLAN.md T1 open question #6) and remain global.
 type CategoryService interface {
 	ListCategories(ctx context.Context, userID int64) ([]model.Category, error)
-	CreateCategory(ctx context.Context, userID int64, name, icon, colour string) (model.Category, error)
+	CreateCategory(ctx context.Context, userID int64, name, icon, colour string, group *string) (model.Category, error)
 	UpdateCategory(ctx context.Context, userID, id int64, name, icon, colour string, group *string) (model.Category, error)
 	DeleteCategory(ctx context.Context, userID, id int64) error
 	CreateSubCategory(ctx context.Context, userID, categoryID int64, name string) (model.SubCategory, error)
@@ -240,14 +240,19 @@ func (s *postgresCategoryService) hydrateItemStats(ctx context.Context, categori
 	return locationRows.Err()
 }
 
-func (s *postgresCategoryService) CreateCategory(ctx context.Context, userID int64, name, icon, colour string) (model.Category, error) {
+func (s *postgresCategoryService) CreateCategory(ctx context.Context, userID int64, name, icon, colour string, group *string) (model.Category, error) {
 	var c model.Category
+	// nil -> name-based default; a pointer (including "") is taken as given.
+	groupValue := model.DefaultStylebookGroup(name)
+	if group != nil {
+		groupValue = *group
+	}
 	err := s.db.QueryRow(
 		ctx,
-		`INSERT INTO Categories (userId, name, icon, colour, createdAt, updatedAt)
-		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), now(), now())
+		`INSERT INTO Categories (userId, name, icon, colour, stylebookGroup, createdAt, updatedAt)
+		 VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), now(), now())
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, stylebookGroup, createdAt, updatedAt`,
-		userID, name, icon, colour, model.DefaultStylebookGroup(name),
+		userID, name, icon, colour, groupValue,
 	).Scan(&c.ID, &c.UserID, &c.Name, &c.Icon, &c.Colour, &c.ReminderOnExpiry, &c.StylebookGroup, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		if isDuplicateNameViolation(err) {
@@ -279,7 +284,7 @@ func (s *postgresCategoryService) UpdateCategory(ctx context.Context, userID, id
 		 SET name = $1,
 		     icon = COALESCE(NULLIF($2, ''), icon),
 		     colour = COALESCE(NULLIF($3, ''), colour),
-			     stylebookGroup = CASE WHEN $6::boolean THEN NULLIF($7::text, '') ELSE stylebookGroup END,
+		     stylebookGroup = CASE WHEN $6::boolean THEN NULLIF($7::text, '') ELSE stylebookGroup END,
 		     updatedAt = now()
 		 WHERE id = $4 AND userId = $5
 		 RETURNING id, userId, name, icon, colour, reminderOnExpiry, stylebookGroup, createdAt, updatedAt`,

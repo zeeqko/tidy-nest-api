@@ -21,6 +21,12 @@ type fakeCategoryService struct {
 	group  *string
 }
 
+func (f *fakeCategoryService) CreateCategory(_ context.Context, _ int64, name, _, _ string, group *string) (model.Category, error) {
+	f.called = true
+	f.group = group
+	return model.Category{Name: name, StylebookGroup: group}, nil
+}
+
 func (f *fakeCategoryService) UpdateCategory(_ context.Context, _, id int64, name, _, _ string, group *string) (model.Category, error) {
 	f.called = true
 	f.group = group
@@ -81,5 +87,44 @@ func TestUpdateCategoryValidGroupPassesValue(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"stylebookGroup":"shoes"`) {
 		t.Fatalf("body missing stylebookGroup: %s", rec.Body.String())
+	}
+}
+
+func postCategory(fake *fakeCategoryService, body string) *httptest.ResponseRecorder {
+	r := chi.NewRouter()
+	r.Post("/categories", NewCategoryController(fake).CreateCategory)
+	req := httptest.NewRequest(http.MethodPost, "/categories", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestCreateCategoryOmittedGroupPassesNil(t *testing.T) {
+	fake := &fakeCategoryService{}
+	if rec := postCategory(fake, `{"name":"X"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	if fake.group != nil {
+		t.Fatalf("group = %q, want nil", *fake.group)
+	}
+}
+
+func TestCreateCategoryExplicitGroupPassesThrough(t *testing.T) {
+	fake := &fakeCategoryService{}
+	if rec := postCategory(fake, `{"name":"X","stylebookGroup":"bags"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	if fake.group == nil || *fake.group != "bags" {
+		t.Fatalf("group = %v, want bags", fake.group)
+	}
+}
+
+func TestCreateCategoryInvalidGroupReturns400(t *testing.T) {
+	fake := &fakeCategoryService{}
+	if rec := postCategory(fake, `{"name":"X","stylebookGroup":"hats"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if fake.called {
+		t.Fatal("service must not be called for an invalid group")
 	}
 }

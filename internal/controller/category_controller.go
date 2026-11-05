@@ -26,8 +26,7 @@ type namePayload struct {
 	Icon   string `json:"icon"`
 	Colour string `json:"colour"`
 	// StylebookGroup is a pointer so an omitted field (nil, leave unchanged)
-	// differs from "" (hidden). Only category update reads it; create always
-	// uses the name-based default.
+	// differs from "" (hidden). On create nil means the name-based default.
 	StylebookGroup *string `json:"stylebookGroup"`
 }
 
@@ -45,7 +44,7 @@ func (c *CategoryController) CreateCategory(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	category, err := c.service.CreateCategory(r.Context(), CurrentUser(r.Context()).ID, payload.Name, payload.Icon, payload.Colour)
+	category, err := c.service.CreateCategory(r.Context(), CurrentUser(r.Context()).ID, payload.Name, payload.Icon, payload.Colour, payload.StylebookGroup)
 	if err != nil {
 		writeCategoryError(w, err)
 		return
