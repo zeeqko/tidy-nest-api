@@ -302,8 +302,8 @@ func ensureSubCategory(ctx context.Context, tx pgx.Tx, userID int64, category, s
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(
 			ctx,
-			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES ($1, $2, now(), now()) RETURNING id`,
-			userID, category,
+			`INSERT INTO Categories (userId, name, stylebookGroup, createdAt, updatedAt) VALUES ($1, $2, NULLIF($3, ''), now(), now()) RETURNING id`,
+			userID, category, model.DefaultStylebookGroup(category),
 		).Scan(&catID)
 	}
 	if err != nil {

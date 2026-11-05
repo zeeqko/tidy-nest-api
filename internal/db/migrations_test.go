@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"organizing-app-backend/internal/model"
@@ -177,7 +179,14 @@ func TestMigration0017MatchesGoDefaults(t *testing.T) {
 		`INSERT INTO Users (name, createdAt, updatedAt) VALUES ('u', now(), now()) RETURNING id`).Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
+	var userID2 int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO Users (name, createdAt, updatedAt) VALUES ('u2', now(), now()) RETURNING id`).Scan(&userID2); err != nil {
+		t.Fatal(err)
+	}
 	names := []string{"Clothes", "Tops", "Shoes", "Footwear", "Accessories", "Handbags", "Food", "Books", "Makeup"}
+	// Case/spacing variants live under a second user: names are unique per user.
+	variants := []string{"SHOES", "hand bags", "Phone Accessories", "FOOTWEAR"}
 	for _, n := range names {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES ($1, $2, now(), now())`,
@@ -186,9 +195,17 @@ func TestMigration0017MatchesGoDefaults(t *testing.T) {
 		}
 	}
 
+	for _, n := range variants {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES ($1, $2, now(), now())`,
+			userID2, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
 	execMigration(t, pool, "0017_add_category_stylebook_group.sql")
 
-	for _, n := range names {
+	for _, n := range append(names, variants...) {
 		var got *string
 		if err := pool.QueryRow(ctx,
 			`SELECT stylebookGroup FROM Categories WHERE name = $1`, n).Scan(&got); err != nil {
@@ -203,8 +220,9 @@ func TestMigration0017MatchesGoDefaults(t *testing.T) {
 		}
 	}
 
-	if _, err := pool.Exec(ctx,
-		`UPDATE Categories SET stylebookGroup = 'hats' WHERE name = 'Food'`); err == nil {
-		t.Error("expected CHECK constraint to reject 'hats'")
+	_, err = pool.Exec(ctx, `UPDATE Categories SET stylebookGroup = 'hats' WHERE name = 'Food'`)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		t.Errorf("expected CHECK violation 23514 for 'hats', got %v", err)
 	}
 }

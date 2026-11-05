@@ -11,12 +11,21 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"organizing-app-backend/internal/model"
 )
 
 // newCategoryTestService connects to TEST_DATABASE_URL, builds migrations
 // 0001..latest in a throwaway schema (dropped on cleanup) and returns a
 // service plus two user ids. Skipped when TEST_DATABASE_URL is unset.
 func newCategoryTestService(t *testing.T) (CategoryService, int64, int64) {
+	t.Helper()
+	pool, a, b := newCategoryTestPool(t)
+	return NewCategoryService(pool, nil), a, b
+}
+
+// newCategoryTestPool is the pool-returning core of newCategoryTestService.
+func newCategoryTestPool(t *testing.T) (*pgxpool.Pool, int64, int64) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -79,7 +88,7 @@ func newCategoryTestService(t *testing.T) (CategoryService, int64, int64) {
 			t.Fatal(err)
 		}
 	}
-	return NewCategoryService(pool, nil), a, b
+	return pool, a, b
 }
 
 func strp(s string) *string { return &s }
@@ -145,4 +154,84 @@ func TestUpdateCategoryStylebookGroup(t *testing.T) {
 	if _, err := svc.UpdateCategory(ctx, other, c.ID, "Kicks", "", "", strp("bags")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("other user's update err = %v, want ErrNotFound", err)
 	}
+}
+
+func TestListCategoriesStylebookGroup(t *testing.T) {
+	pool, u, _ := newCategoryTestPool(t)
+	svc := NewCategoryService(pool, nil)
+	ctx := context.Background()
+	for _, n := range []string{"Pantry", "Gear"} {
+		if _, err := svc.CreateCategory(ctx, u, n, "", "", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE Categories SET stylebookGroup = 'bags' WHERE userId = $1 AND name = 'Gear'`, u); err != nil {
+		t.Fatal(err)
+	}
+	cats, err := svc.ListCategories(ctx, u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cats) != 2 {
+		t.Fatalf("got %d categories, want 2", len(cats))
+	}
+	for _, c := range cats {
+		switch c.Name {
+		case "Gear":
+			wantGroup(t, c.StylebookGroup, "bags")
+		case "Pantry":
+			wantGroup(t, c.StylebookGroup, "")
+		default:
+			t.Fatalf("unexpected category %q", c.Name)
+		}
+	}
+}
+
+func TestInventoryImplicitCategoryStylebookGroup(t *testing.T) {
+	pool, u, _ := newCategoryTestPool(t)
+	svc := NewInventoryService(pool, nil)
+	ctx := context.Background()
+
+	groupOf := func(name string) (*string, int) {
+		var g *string
+		var n int
+		rows, err := pool.Query(ctx, `SELECT stylebookGroup FROM Categories WHERE userId = $1 AND name = $2`, u, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			if err := rows.Scan(&g); err != nil {
+				t.Fatal(err)
+			}
+			n++
+		}
+		return g, n
+	}
+
+	for _, tc := range []struct{ cat, want string }{{"Running Shoes", "shoes"}, {"Swimwear", "clothes"}, {"Sneakers", ""}, {"Pantry", ""}} {
+		if _, err := svc.Create(ctx, u, model.InventoryItem{Name: "x", Category: tc.cat, Subcategory: "Sub", Quantity: 1}); err != nil {
+			t.Fatalf("%s: %v", tc.cat, err)
+		}
+		g, n := groupOf(tc.cat)
+		if n != 1 {
+			t.Fatalf("%s: %d rows, want 1", tc.cat, n)
+		}
+		wantGroup(t, g, tc.want)
+	}
+
+	// An existing category keeps its group when another item is saved into it.
+	if _, err := pool.Exec(ctx,
+		`UPDATE Categories SET stylebookGroup = 'bags' WHERE userId = $1 AND name = 'Running Shoes'`, u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Create(ctx, u, model.InventoryItem{Name: "y", Category: "running shoes", Subcategory: "Other", Quantity: 1}); err != nil {
+		t.Fatal(err)
+	}
+	g, n := groupOf("Running Shoes")
+	if n != 1 {
+		t.Fatalf("Running Shoes: %d rows, want 1", n)
+	}
+	wantGroup(t, g, "bags")
 }
