@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"organizing-app-backend/internal/model"
 )
 
 // newTestPool connects to TEST_DATABASE_URL and returns a pool whose
@@ -152,5 +154,57 @@ func TestMigration0016ShiftsOnlyY(t *testing.T) {
 	}
 	if i != len(want) {
 		t.Fatalf("got %d rows, want %d", i, len(want))
+	}
+}
+
+func TestMigration0017MatchesGoDefaults(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() >= "0017" {
+			break
+		}
+		execMigration(t, pool, e.Name())
+	}
+
+	var userID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO Users (name, createdAt, updatedAt) VALUES ('u', now(), now()) RETURNING id`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"Clothes", "Tops", "Shoes", "Footwear", "Accessories", "Handbags", "Food", "Books", "Makeup"}
+	for _, n := range names {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO Categories (userId, name, createdAt, updatedAt) VALUES ($1, $2, now(), now())`,
+			userID, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	execMigration(t, pool, "0017_add_category_stylebook_group.sql")
+
+	for _, n := range names {
+		var got *string
+		if err := pool.QueryRow(ctx,
+			`SELECT stylebookGroup FROM Categories WHERE name = $1`, n).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		want := model.DefaultStylebookGroup(n)
+		switch {
+		case want == "" && got != nil:
+			t.Errorf("%s: got %q, want NULL", n, *got)
+		case want != "" && (got == nil || *got != want):
+			t.Errorf("%s: got %v, want %q", n, got, want)
+		}
+	}
+
+	if _, err := pool.Exec(ctx,
+		`UPDATE Categories SET stylebookGroup = 'hats' WHERE name = 'Food'`); err == nil {
+		t.Error("expected CHECK constraint to reject 'hats'")
 	}
 }
