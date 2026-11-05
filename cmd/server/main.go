@@ -78,7 +78,10 @@ func main() {
 		log.Printf("GEMINI_API_KEY not set — AI item recognition disabled")
 	}
 
-	addr := ":8080"
+	addr, err := listenAddr(os.Getenv("PORT"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	log.Printf("organizing-app backend listening on %s", addr)
 	if err := http.ListenAndServe(addr, router.New(pool, photos, aiClient)); err != nil {
 		log.Fatal(err)
